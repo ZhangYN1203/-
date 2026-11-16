@@ -1,0 +1,73 @@
+{
+  "name": "order-print-tool",
+  "version": "1.0.0",
+  "description": "商品装具调拨单打印工具 - 基于 Electron 的本地订单打印管理系统",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder",
+    "build:vite": "tsc && vite build",
+    "preview": "vite preview",
+    "electron:dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 && set VITE_DEV_SERVER_URL=http://localhost:5173 && electron .\"",
+    "electron:build": "tsc -p tsconfig.electron.json && vite build && electron-builder --win --x64",
+    "electron:build:dir": "tsc -p tsconfig.electron.json && vite build && electron-builder --win --x64 --dir"
+  },
+  "build": {
+    "appId": "com.jsww.order-print-tool",
+    "productName": "商品装具调拨单打印工具",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": null,
+      "sign": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "商品装具调拨单打印工具"
+    },
+    "extraResources": [
+      {
+        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql-wasm.wasm"
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm"
+    ]
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "sql.js": "^1.11.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "~5.6.3",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.1"
+  }
+}
