@@ -57,4 +57,4 @@ Files: electron/main.ts, electron/preload.ts, src/types/index.ts, src/utils/ipc.
 - [x] Run all unit/integration tests, frontend and main-process typechecks/builds.
 - [x] Exercise settings, preview, export, pagination and draft cancellation in Chromium, including long multi-page content.
 - [x] Obtain fresh whole-branch review, reproduce/fix important findings, rerun checks.
-- [ ] Push feature branch changes through GitHub and create PR with validation results and Windows calibration steps.
+- [x] Push feature branch changes through GitHub and create PR with validation results and Windows calibration steps.
