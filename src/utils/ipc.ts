@@ -29,6 +29,10 @@ export async function fetchOrderById(id: number): Promise<(Order & { items: Orde
   return api.getOrderById(id)
 }
 
+export async function saveOrderWithItems(request: { id?: number; order: Partial<Order>; items: Partial<OrderItem>[] }): Promise<{ id: number; documentNo: string }> {
+  return getApi().saveOrderWithItems(request)
+}
+
 export async function saveOrder(data: Partial<Order>): Promise<{ id: number }> {
   const api = getApi()
   return api.createOrder(data)
@@ -228,7 +232,7 @@ export async function removePriceTableProduct(priceTableId: number, productCode:
   return api.removePriceTableProduct(priceTableId, productCode)
 }
 
-export async function undoPriceTableChange(priceTableId: number): Promise<{ success: boolean; log?: PriceChangeLog }> {
+export async function undoPriceTableChange(priceTableId: number): Promise<{ success: boolean; log?: PriceChangeLog; message?: string }> {
   const api = getApi()
   return api.undoPriceTableChange(priceTableId)
 }

@@ -5,7 +5,7 @@ import {
   updatePriceTableItem, undoPriceTableChange, getPriceTableLogs,
   createCustomer, updateCustomer, deleteCustomer,
   addPriceTableProduct, removePriceTableProduct,
-  searchProducts, createProduct, deleteProduct, createPriceTable, deletePriceTable, renamePriceTable,
+  searchProducts, createProduct, updateProduct, deleteProduct, createPriceTable, deletePriceTable, renamePriceTable,
   saveFile,
 } from '../utils/ipc'
 import type { Customer, CustomerPrice, PriceTable, PriceChangeLog, Product } from '../types'
@@ -379,7 +379,7 @@ const PriceManager: React.FC = () => {
     if (!selectedTable) return
     try {
       const result = await undoPriceTableChange(selectedTable.id)
-      if (result.success) {
+      if (result.success && result.log) {
         setMessage(`已撤销：${result.log.productCode} 恢复为 ¥${result.log.oldPrice.toFixed(2)}`)
         loadPrices()
       } else {

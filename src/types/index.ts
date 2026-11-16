@@ -1,4 +1,6 @@
+import type { PrintDocumentRequest, PrintDocumentResult, PrinterInfo } from '../../electron/print-model'
 export interface Order {
+  customerId?: number | null
   id: number
   documentNo: string
   orderNo: string
@@ -36,7 +38,8 @@ export interface OrderItem {
   amount: number
   remark: string
   sortOrder: number
-  packageSpec?: string
+  packageSpec?: string | null
+  snapshotNeedsReview?: boolean
 }
 
 export interface Product {
@@ -92,6 +95,15 @@ export interface PriceChangeLog {
 }
 
 export interface ElectronAPI {
+  printDocument: (request: PrintDocumentRequest) => Promise<PrintDocumentResult>
+  listPrinters: () => Promise<PrinterInfo[]>
+  getProductionStatus: () => Promise<{version:1;migrated:boolean;backupPath:string|null}>
+  migrateProductionData: (bundle: {version:1;stores:Record<string,Record<string,any>[]>}) => Promise<{version:1;migrated:boolean;backupPath:string|null}>
+  getProductionRecords: (store:string) => Promise<Record<string,any>[]>
+  getProductionRecord: (store:string,id:number) => Promise<Record<string,any>|null>
+  applyProductionOperations: (operations:{type:'add'|'put'|'delete';store:string;data?:Record<string,any>;id?:number;expectedQuantity?:number;expectedStatus?:string}[]) => Promise<{results:(number|null)[]}>
+
+  saveOrderWithItems: (request: {id?: number; order: Partial<Order>; items: Partial<OrderItem>[]}) => Promise<{id: number; documentNo: string}>
   generateDocumentNo: (date?: string) => Promise<string>
   getOrders: (filters?: { search?: string }) => Promise<(Order & { itemCount?: number; totalQuantity?: number })[]>
   getOrderById: (id: number) => Promise<(Order & { items: OrderItem[] }) | null>
@@ -117,7 +129,7 @@ export interface ElectronAPI {
   // Customer Prices (legacy)
   getCustomerPrices: (customerCode: string) => Promise<CustomerPrice[]>
   updateCustomerPrice: (customerCode: string, productCode: string, newPrice: number) => Promise<{ success: boolean }>
-  undoLastPriceChange: (customerCode: string) => Promise<{ success: boolean; log?: PriceChangeLog }>
+  undoLastPriceChange: (customerCode: string) => Promise<{ success: boolean; log?: PriceChangeLog; message?: string }>
   initCustomerPrices: (customerCode: string) => Promise<{ success: boolean }>
   getPriceChangeLogs: (customerCode: string) => Promise<PriceChangeLog[]>
 
@@ -142,7 +154,7 @@ export interface ElectronAPI {
   updatePriceTableItem: (priceTableId: number, productCode: string, newPrice: number) => Promise<{ success: boolean }>
   addPriceTableProduct: (priceTableId: number, productCode: string) => Promise<{ success: boolean; message?: string }>
   removePriceTableProduct: (priceTableId: number, productCode: string) => Promise<{ success: boolean; message?: string }>
-  undoPriceTableChange: (priceTableId: number) => Promise<{ success: boolean; log?: PriceChangeLog }>
+  undoPriceTableChange: (priceTableId: number) => Promise<{ success: boolean; log?: PriceChangeLog; message?: string }>
   getPriceTableLogs: (priceTableId: number) => Promise<PriceChangeLog[]>
 
   // Order Summary

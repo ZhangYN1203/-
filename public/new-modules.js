@@ -130,96 +130,116 @@
     });
   }
 
+  var PRODUCTION_STORES = ['workshops', 'materials', 'material_inbound', 'material_outbound', 'suppliers', 'productions', 'production_materials', 'finished_products', 'finished_product_logs', 'stock_logs'];
+  var storageReady = null;
+  var browserStorage = false;
+  var dataLoaded = false;
+  var storageError = null;
+
+  function legacyBundle() {
+    return openDB().then(function(db) {
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(PRODUCTION_STORES, 'readonly');
+        var bundle = { version: 1, stores: {} };
+        PRODUCTION_STORES.forEach(function(store) {
+          var request = tx.objectStore(store).getAll();
+          request.onsuccess = function() { bundle.stores[store] = request.result; };
+        });
+        tx.oncomplete = function() { db.close(); resolve(bundle); };
+        tx.onerror = tx.onabort = function() { db.close(); reject(tx.error || new Error('读取旧生产数据失败')); };
+      });
+    });
+  }
+
+  function ensureStorage() {
+    if (storageReady) return storageReady;
+    storageReady = Promise.resolve().then(function() {
+      if (window.electronAPI && window.electronAPI.getProductionStatus) {
+        return window.electronAPI.getProductionStatus().then(function(status) {
+          if (status.migrated) return status;
+          return legacyBundle().then(function(bundle) { return window.electronAPI.migrateProductionData(bundle); }).then(function(result) {
+            if (!result.migrated) throw new Error('迁移未完成，请重试');
+            return result;
+          });
+        });
+      }
+      // Standalone use is deliberately opt-in; Electron must never silently switch stores.
+      if (!window.electronAPI && window.__ALLOW_LEGACY_PRODUCTION_STORAGE__ === true) { browserStorage = true; return; }
+      throw new Error('生产数据库接口不可用，请使用桌面应用打开');
+    }).catch(function(err) { storageReady = null; throw err; });
+    return storageReady;
+  }
+
+  function showStorageError(err) {
+    dataLoaded = false;
+    storageError = err;
+    var content = document.getElementById('new-modules-content');
+    if (content) content.innerHTML = '<div class="card" style="padding:24px"><h3>生产数据尚未就绪</h3><p>' + escapeHtml(err.message || String(err)) + '</p><p>旧数据已保留。请解决备份或磁盘问题后重试。</p><button class="btn btn-primary" onclick="window.__newModule.retryStorage()">重试迁移 / 读取</button></div>';
+  }
+
   function getAllFromStore(storeName) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readonly');
-        var store = tx.objectStore(storeName);
-        var request = store.getAll();
-        request.onsuccess = function() { resolve(request.result); };
-        request.onerror = function() { reject(request.error); };
-      });
+    return ensureStorage().then(function() {
+      if (!browserStorage) return window.electronAPI.getProductionRecords(storeName);
+      return legacyBundle().then(function(bundle) { return bundle.stores[storeName]; });
     });
   }
-
   function getById(storeName, id) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readonly');
-        var store = tx.objectStore(storeName);
-        var request = store.get(id);
-        request.onsuccess = function() { resolve(request.result); };
-        request.onerror = function() { reject(request.error); };
-      });
-    });
+    return getAllFromStore(storeName).then(function(records) { return records.find(function(record) { return record.id === id; }); });
   }
-
-  function addToStore(storeName, data) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readwrite');
-        var store = tx.objectStore(storeName);
-        var request = store.add(data);
-        request.onsuccess = function() { resolve(request.result); };
-        request.onerror = function() { reject(request.error); };
-      });
-    });
-  }
-
-  function updateInStore(storeName, data) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readwrite');
-        var store = tx.objectStore(storeName);
-        var request = store.put(data);
-        request.onsuccess = function() { resolve(request.result); };
-        request.onerror = function() { reject(request.error); };
-      });
-    });
-  }
-
-  function deleteFromStore(storeName, id) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readwrite');
-        var store = tx.objectStore(storeName);
-        var request = store.delete(id);
-        request.onsuccess = function() { resolve(); };
-        request.onerror = function() { reject(request.error); };
-      });
-    });
-  }
-
   function getByIndex(storeName, indexName, value) {
-    return openDB().then(function(db) {
-      return new Promise(function(resolve, reject) {
-        var tx = db.transaction(storeName, 'readonly');
-        var store = tx.objectStore(storeName);
-        var index = store.index(indexName);
-        var request = index.getAll(value);
-        request.onsuccess = function() { resolve(request.result); };
-        request.onerror = function() { reject(request.error); };
+    return getAllFromStore(storeName).then(function(records) { return records.filter(function(record) { return record[indexName] === value; }); });
+  }
+  function batchOperations(operations) {
+    return ensureStorage().then(function() {
+      if (!browserStorage) return window.electronAPI.applyProductionOperations(operations);
+      return openDB().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var stores = operations.map(function(op) { return op.store; }).filter(function(name, index, all) { return all.indexOf(name) === index; });
+          var tx = db.transaction(stores, 'readwrite');
+          var results = [];
+          function resolveRefs(value) {
+            if (value && typeof value === 'object') {
+              if (Object.keys(value).length === 1 && value.$result !== undefined) return results[value.$result];
+              var copy = Array.isArray(value) ? [] : {};
+              Object.keys(value).forEach(function(key) { copy[key] = resolveRefs(value[key]); });
+              return copy;
+            }
+            return value;
+          }
+          function next(index) {
+            if (index >= operations.length) return;
+            var op = operations[index];
+            var store = tx.objectStore(op.store);
+            var data = resolveRefs(op.data);
+            var request = op.type === 'delete' ? store.delete(op.id) : store[op.type](data);
+            request.onsuccess = function() { results.push(request.result === undefined ? null : request.result); next(index + 1); };
+          }
+          tx.oncomplete = function() { db.close(); resolve({ results: results }); };
+          tx.onerror = tx.onabort = function() { db.close(); reject(tx.error || new Error('保存失败')); };
+          next(0);
+        });
       });
+    }).catch(function(err) {
+      // Draft objects are copied, and refreshing prevents a failed operation from showing committed stock.
+      loadAllData().then(function() { renderPage(state.currentPage); }).catch(showStorageError);
+      throw err;
     });
   }
-
-  // ============================================================
-  // 库存日志记录
-  // ============================================================
-  function addStockLog(stockType, itemId, itemName, changeType, quantity, beforeQty, afterQty, operator, remark) {
-    var log = {
-      stock_type: stockType,
-      item_id: itemId,
-      item_name: itemName,
-      change_type: changeType,
-      quantity: quantity,
-      before_quantity: beforeQty,
-      after_quantity: afterQty,
-      operator: operator || '管理员',
-      remark: remark || '',
-      created_at: now()
-    };
-    return addToStore('stock_logs', log);
+  function addToStore(storeName, data) {
+    return batchOperations([{ type: 'add', store: storeName, data: data }]).then(function(result) { return result.results[0]; });
+  }
+  function updateInStore(storeName, data) {
+    return batchOperations([{ type: 'put', store: storeName, data: data }]).then(function(result) { return result.results[0]; });
+  }
+  function deleteFromStore(storeName, id) {
+    return batchOperations([{ type: 'delete', store: storeName, id: id }]);
+  }
+  function stockLogOperation(stockType, itemId, itemName, changeType, quantity, beforeQty, afterQty, operator, remark) {
+    return { type: 'add', store: 'stock_logs', data: {
+      stock_type: stockType, item_id: itemId, item_name: itemName, change_type: changeType,
+      quantity: quantity, before_quantity: beforeQty, after_quantity: afterQty,
+      operator: operator || '管理员', remark: remark || '', created_at: now()
+    } };
   }
 
   // ============================================================
@@ -313,7 +333,7 @@
     // 加载数据并渲染默认页面
     loadAllData().then(function() {
       renderPage('materials');
-    });
+    }).catch(showStorageError);
   }
 
   function buildSidebarHTML() {
@@ -335,17 +355,13 @@
   }
 
   function loadAllData() {
-    return Promise.all([
-      getAllFromStore('materials').then(function(d) { state.materials = d; }),
-      getAllFromStore('suppliers').then(function(d) { state.suppliers = d; }),
-      getAllFromStore('productions').then(function(d) { state.productions = d; }),
-      getAllFromStore('finished_products').then(function(d) { state.finishedProducts = d; }),
-      getAllFromStore('material_inbound').then(function(d) { state.materialInbounds = d; }),
-      getAllFromStore('material_outbound').then(function(d) { state.materialOutbounds = d; }),
-      getAllFromStore('stock_logs').then(function(d) { state.stockLogs = d; }),
-      getAllFromStore('finished_product_logs').then(function(d) { state.finishedProductLogs = d; }),
-      getAllFromStore('workshops').then(function(d) { state.workshops = d; }),
-    ]);
+    var storeNames = ['materials', 'suppliers', 'productions', 'finished_products', 'material_inbound', 'material_outbound', 'stock_logs', 'finished_product_logs', 'workshops'];
+    var stateNames = ['materials', 'suppliers', 'productions', 'finishedProducts', 'materialInbounds', 'materialOutbounds', 'stockLogs', 'finishedProductLogs', 'workshops'];
+    return Promise.all(storeNames.map(getAllFromStore)).then(function(records) {
+      records.forEach(function(data, index) { state[stateNames[index]] = data; });
+      dataLoaded = true;
+      storageError = null;
+    }).catch(function(err) { showStorageError(err); throw err; });
   }
 
   function navigateTo(page) {
@@ -362,6 +378,7 @@
   // 页面渲染
   // ============================================================
   function renderPage(page) {
+    if (!dataLoaded) { showStorageError(storageError || new Error('正在读取生产数据，请稍候')); return; }
     var content = document.getElementById('new-modules-content');
     if (!content) return;
 
@@ -526,6 +543,7 @@
     if (!qty || qty <= 0) { showToast('请输入有效的入库数量', 'error'); return; }
 
     var material = state.materials.find(function(m) { return m.id === materialId; });
+    if (material) material = Object.assign({}, material);
     if (!material) { showToast('原材料不存在', 'error'); return; }
 
     var beforeQty = material.quantity || 0;
@@ -546,11 +564,11 @@
       created_at: now()
     };
 
-    updateInStore('materials', material).then(function() {
-      return addToStore('material_inbound', inboundRecord);
-    }).then(function() {
-      return addStockLog('material', materialId, material.name, 'inbound', qty, beforeQty, afterQty, operator, remark);
-    }).then(function() {
+    batchOperations([
+      { type: 'put', store: 'materials', data: material, expectedQuantity: beforeQty },
+      { type: 'add', store: 'material_inbound', data: inboundRecord },
+      stockLogOperation('material', materialId, material.name, 'inbound', qty, beforeQty, afterQty, operator, remark)
+    ]).then(function() {
       showToast('入库成功！' + material.name + ' +' + qty + ' ' + (material.unit || ''));
       document.getElementById('inbound-modal').remove();
       return loadAllData();
@@ -613,6 +631,7 @@
 
     var workshop = state.workshops.find(function(w) { return w.id === workshopId; });
     var material = state.materials.find(function(m) { return m.id === materialId; });
+    if (material) material = Object.assign({}, material);
     if (!material) { showToast('原材料不存在', 'error'); return; }
 
     var beforeQty = material.quantity || 0;
@@ -635,11 +654,11 @@
       created_at: now()
     };
 
-    updateInStore('materials', material).then(function() {
-      return addToStore('material_outbound', outboundRecord);
-    }).then(function() {
-      return addStockLog('material', materialId, material.name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop);
-    }).then(function() {
+    batchOperations([
+      { type: 'put', store: 'materials', data: material, expectedQuantity: beforeQty },
+      { type: 'add', store: 'material_outbound', data: outboundRecord },
+      stockLogOperation('material', materialId, material.name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop)
+    ]).then(function() {
       showToast('出库成功！' + material.name + ' -' + qty + ' ' + (material.unit || ''));
       document.getElementById('outbound-modal').remove();
       return loadAllData();
@@ -1154,9 +1173,9 @@
         var statusMap = { pending: '待生产', production: '生产中', completed: '已完成', warehoused: '成品入库', shipped: '已出库' };
         var statusText = statusMap[p.status] || p.status;
         html += '<tr>' +
-          '<td><strong>' + escapeHtml(p.order_no || '订单#' + p.order_id) + '</strong></td>' +
+          '<td><strong>' + escapeHtml(p.order_no || '订单#' + p.order_id) + '</strong>' + (p.orderId ? '' : '<small style="display:block;color:#9a6700">未关联历史任务</small>') + '</td>' +
           '<td>' + escapeHtml(p.manager || '-') + '</td>' +
-          '<td><span class="status-badge ' + p.status + '">' + statusText + '</span></td>' +
+          '<td><span class="status-badge ' + escapeHtml(p.status) + '">' + escapeHtml(statusText) + '</span></td>' +
           '<td>' + (p.start_time ? formatDate(p.start_time) : '-') + '</td>' +
           '<td>' + (p.finish_time ? formatDate(p.finish_time) : '-') + '</td>' +
           '<td>' +
@@ -1221,23 +1240,11 @@
     overlay.className = 'modal-overlay';
     overlay.id = 'create-production-modal';
 
-    // 尝试从 localStorage 获取订单数据（与原有系统交互）
-    var orderOptions = '<option value="">直接输入订单号</option>';
-    try {
-      var ordersData = localStorage.getItem('orders');
-      if (ordersData) {
-        var orders = JSON.parse(ordersData);
-        orders.forEach(function(o) {
-          orderOptions += '<option value="' + (o.id || o.order_no) + '">' + escapeHtml(o.order_no || '订单#' + o.id) + '</option>';
-        });
-      }
-    } catch(e) {}
-
     overlay.innerHTML = '<div class="modal-dialog">' +
       '<h3>➕ 新建生产任务</h3>' +
       '<div class="modal-body">' +
       '<div class="form-grid">' +
-      '<div class="form-field"><label>订单编号 *</label><input type="text" id="prod-order-no" placeholder="输入订单编号"></div>' +
+      '<div class="form-field"><label>关联订单 *</label><select id="prod-order-id"><option value="">正在加载订单...</option></select></div>' +
       '<div class="form-field"><label>生产负责人 *</label><input type="text" id="prod-manager" placeholder="负责人姓名"></div>' +
       '<div class="form-field" style="grid-column:1/-1"><label>备注</label><textarea id="prod-remark" rows="2"></textarea></div>' +
       '</div>' +
@@ -1248,19 +1255,30 @@
       '</div></div>';
 
     document.body.appendChild(overlay);
+    if (!window.electronAPI || !window.electronAPI.getOrders) {
+      document.getElementById('prod-order-id').innerHTML = '<option value="">请在桌面应用内选择订单</option>';
+      return;
+    }
+    window.electronAPI.getOrders().then(function(orders) {
+      var select = document.getElementById('prod-order-id');
+      if (!select) return;
+      select.innerHTML = '<option value="">请选择已保存订单</option>' + orders.map(function(order) {
+        return '<option value="' + order.id + '">' + escapeHtml(order.documentNo + ' · ' + (order.receiver || '')) + '</option>';
+      }).join('');
+    }).catch(function(err) { showToast('订单读取失败: ' + err.message, 'error'); });
   }
 
   function confirmCreateProduction() {
-    var orderNo = document.getElementById('prod-order-no').value.trim();
+    var orderId = Number(document.getElementById('prod-order-id').value);
     var manager = document.getElementById('prod-manager').value.trim();
     var remark = document.getElementById('prod-remark').value.trim();
 
-    if (!orderNo) { showToast('请输入订单编号', 'error'); return; }
+    if (!orderId) { showToast('请选择已保存订单', 'error'); return; }
     if (!manager) { showToast('请输入生产负责人', 'error'); return; }
 
     var production = {
-      order_no: orderNo,
-      order_id: 0,
+      orderId: orderId,
+      order_id: orderId,
       manager: manager,
       status: 'pending',
       start_time: null,
@@ -1332,6 +1350,7 @@
   // ============================================================
   function showAddMaterialToProduction(productionId) {
     var p = state.productions.find(function(x) { return x.id === productionId; });
+    if (p) p = Object.assign({}, p);
     if (!p) return;
 
     var overlay = document.createElement('div');
@@ -1374,6 +1393,7 @@
 
     var workshop = state.workshops.find(function(w) { return w.id === workshopId; });
     var material = state.materials.find(function(m) { return m.id === materialId; });
+    if (material) material = Object.assign({}, material);
     if (!material) { showToast('原材料不存在', 'error'); return; }
 
     var beforeQty = material.quantity || 0;
@@ -1405,13 +1425,12 @@
 
     var remarkWithWorkshop = (workshop ? '车间: ' + workshop.name + '; ' : '') + '生产领料: ' + remark;
 
-    updateInStore('materials', material).then(function() {
-      return addToStore('production_materials', pmRecord);
-    }).then(function() {
-      return addToStore('material_outbound', outboundRecord);
-    }).then(function() {
-      return addStockLog('material', materialId, material.name, 'production_use', -qty, beforeQty, afterQty, operator, remarkWithWorkshop);
-    }).then(function() {
+    batchOperations([
+      { type: 'put', store: 'materials', data: material, expectedQuantity: beforeQty },
+      { type: 'add', store: 'production_materials', data: pmRecord },
+      { type: 'add', store: 'material_outbound', data: outboundRecord },
+      stockLogOperation('material', materialId, material.name, 'production_use', -qty, beforeQty, afterQty, operator, remarkWithWorkshop)
+    ]).then(function() {
       showToast('领料成功！' + material.name + ' -' + qty + ' ' + (material.unit || ''));
       document.getElementById('add-pm-modal').remove();
       return loadAllData();
@@ -1441,7 +1460,7 @@
         '<h3>📋 生产任务详情</h3>' +
         '<div class="detail-row"><span class="detail-label">订单编号</span><span class="detail-value"><strong>' + escapeHtml(p.order_no || '') + '</strong></span></div>' +
         '<div class="detail-row"><span class="detail-label">生产负责人</span><span class="detail-value">' + escapeHtml(p.manager || '-') + '</span></div>' +
-        '<div class="detail-row"><span class="detail-label">状态</span><span class="detail-value"><span class="status-badge ' + p.status + '">' + (statusMap[p.status] || p.status) + '</span></span></div>' +
+        '<div class="detail-row"><span class="detail-label">状态</span><span class="detail-value"><span class="status-badge ' + escapeHtml(p.status) + '">' + escapeHtml(statusMap[p.status] || p.status) + '</span></span></div>' +
         '<div class="detail-row"><span class="detail-label">开始时间</span><span class="detail-value">' + (p.start_time ? formatDate(p.start_time) : '-') + '</span></div>' +
         '<div class="detail-row"><span class="detail-label">完成时间</span><span class="detail-value">' + (p.finish_time ? formatDate(p.finish_time) : '-') + '</span></div>' +
         '<div class="detail-row"><span class="detail-label">备注</span><span class="detail-value">' + escapeHtml(p.remark || '-') + '</span></div>' +
@@ -1476,6 +1495,7 @@
   // ============================================================
   function showWarehouseDialog(productionId) {
     var p = state.productions.find(function(x) { return x.id === productionId; });
+    if (p) p = Object.assign({}, p);
     if (!p) return;
 
     var overlay = document.createElement('div');
@@ -1500,9 +1520,13 @@
     document.body.appendChild(overlay);
   }
 
+  var pendingWarehouse = {};
   function confirmWarehouse(productionId) {
+    if (pendingWarehouse[productionId]) return;
     var p = state.productions.find(function(x) { return x.id === productionId; });
+    if (p) p = Object.assign({}, p);
     if (!p) return;
+    if (p.status !== 'completed') { showToast('任务状态已变化，请刷新后重试', 'error'); return; }
 
     var name = document.getElementById('fp-name').value.trim();
     var qty = parseFloat(document.getElementById('fp-qty').value);
@@ -1512,64 +1536,45 @@
     if (!name) { showToast('请输入产品名称', 'error'); return; }
     if (!qty || qty <= 0) { showToast('请输入有效的入库数量', 'error'); return; }
 
-    // 检查是否已有该订单的成品记录
-    getByIndex('finished_products', 'order_id', p.order_id || 0).then(function(existing) {
-      if (existing && existing.length > 0) {
-        // 更新现有成品
-        var fp = existing[0];
-        var beforeQty = fp.quantity || 0;
-        fp.quantity = beforeQty + qty;
-        fp.updated_at = now();
+    pendingWarehouse[productionId] = true;
+    var modal = document.getElementById('warehouse-modal');
+    if (modal) modal.querySelectorAll('button,input,textarea').forEach(function(el) { el.disabled = true; });
 
-        return updateInStore('finished_products', fp).then(function() {
-          return { fp: fp, beforeQty: beforeQty, isNew: false };
-        });
-      } else {
-        // 新建成品记录
-        var fp = {
-          product_name: name,
-          quantity: qty,
-          order_id: p.order_id || 0,
-          order_no: p.order_no,
-          production_id: productionId,
-          remark: remark,
-          created_at: now(),
-          updated_at: now()
-        };
-        return addToStore('finished_products', fp).then(function(id) {
-          fp.id = id;
-          return { fp: fp, beforeQty: 0, isNew: true };
-        });
-      }
-    }).then(function(result) {
-      // 更新生产状态
+    // Match the actual production and product name; unrelated legacy tasks all have order_id=0.
+    getAllFromStore('finished_products').then(function(records) {
+      var existing = records.find(function(record) { return record.production_id === productionId && record.product_name === name; });
+      var beforeQty = existing ? existing.quantity || 0 : 0;
+      var fp = Object.assign({}, existing || {
+        product_name: name, order_id: p.order_id || 0, order_no: p.order_no,
+        production_id: productionId, remark: remark, created_at: now()
+      }, { quantity: beforeQty + qty, updated_at: now() });
+      var fpRef = existing ? fp.id : { $result: 0 };
       p.status = 'warehoused';
       p.updated_at = now();
-      return updateInStore('productions', p).then(function() {
-        return result;
-      });
-    }).then(function(result) {
-      // 记录日志
-      var log = {
-        product_id: result.fp.id,
-        type: 'inbound',
-        quantity: qty,
-        order_id: p.order_id || 0,
-        operator: operator,
-        remark: '生产入库: ' + remark,
-        created_at: now()
-      };
-      return addToStore('finished_product_logs', log).then(function() {
-        return addStockLog('finished_product', result.fp.id, result.fp.product_name, 'inbound', qty, result.beforeQty, result.beforeQty + qty, operator, '生产入库');
-      });
+      var stockOp = { type: existing ? 'put' : 'add', store: 'finished_products', data: fp };
+      if (existing) stockOp.expectedQuantity = beforeQty;
+      return batchOperations([
+        stockOp,
+        { type: 'put', store: 'productions', data: p, expectedStatus: 'completed' },
+        { type: 'add', store: 'finished_product_logs', data: {
+          product_id: fpRef, type: 'inbound', quantity: qty, order_id: p.order_id || 0,
+          operator: operator, remark: '生产入库: ' + remark, created_at: now()
+        } },
+        stockLogOperation('finished_product', fpRef, name, 'inbound', qty, beforeQty, beforeQty + qty, operator, '生产入库')
+      ]);
     }).then(function() {
       showToast('成品入库成功！');
-      document.getElementById('warehouse-modal').remove();
+      var modal = document.getElementById('warehouse-modal');
+      if (modal) modal.remove();
       return loadAllData();
     }).then(function() {
       renderPage(state.currentPage);
     }).catch(function(err) {
       showToast('入库失败: ' + err.message, 'error');
+    }).finally(function() {
+      delete pendingWarehouse[productionId];
+      var modal = document.getElementById('warehouse-modal');
+      if (modal) modal.querySelectorAll('button,input,textarea').forEach(function(el) { el.disabled = false; });
     });
   }
 
@@ -1578,6 +1583,7 @@
   // ============================================================
   function showShipDialog(productionId) {
     var p = state.productions.find(function(x) { return x.id === productionId; });
+    if (p) p = Object.assign({}, p);
     if (!p) return;
 
     var overlay = document.createElement('div');
@@ -1585,7 +1591,7 @@
     overlay.id = 'ship-modal';
 
     // 查找该订单的成品
-    getByIndex('finished_products', 'order_id', p.order_id || 0).then(function(products) {
+    getByIndex('finished_products', 'production_id', productionId).then(function(products) {
       var fpOptions = products.map(function(fp) {
         return '<option value="' + fp.id + '">' + escapeHtml(fp.product_name) + ' - 库存: ' + (fp.quantity || 0) + '</option>';
       }).join('');
@@ -1616,6 +1622,7 @@
 
   function confirmShip(productionId) {
     var p = state.productions.find(function(x) { return x.id === productionId; });
+    if (p) p = Object.assign({}, p);
     if (!p) return;
 
     var productId = parseInt(document.getElementById('ship-product-id').value);
@@ -1630,6 +1637,7 @@
 
     var workshop = state.workshops.find(function(w) { return w.id === workshopId; });
     var fp = state.finishedProducts.find(function(x) { return x.id === productId; });
+    if (fp) fp = Object.assign({}, fp);
     if (!fp) { showToast('成品不存在', 'error'); return; }
 
     var beforeQty = fp.quantity || 0;
@@ -1656,13 +1664,12 @@
       created_at: now()
     };
 
-    updateInStore('finished_products', fp).then(function() {
-      return updateInStore('productions', p);
-    }).then(function() {
-      return addToStore('finished_product_logs', log);
-    }).then(function() {
-      return addStockLog('finished_product', fp.id, fp.product_name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop);
-    }).then(function() {
+    batchOperations([
+      { type: 'put', store: 'finished_products', data: fp, expectedQuantity: beforeQty },
+      { type: 'put', store: 'productions', data: p },
+      { type: 'add', store: 'finished_product_logs', data: log },
+      stockLogOperation('finished_product', fp.id, fp.product_name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop)
+    ]).then(function() {
       showToast('出库成功！' + fp.product_name + ' -' + qty);
       document.getElementById('ship-modal').remove();
       return loadAllData();
@@ -1793,6 +1800,7 @@
   // ============================================================
   function showManualOutboundDialog(productId) {
     var fp = state.finishedProducts.find(function(x) { return x.id === productId; });
+    if (fp) fp = Object.assign({}, fp);
     if (!fp) return;
 
     var overlay = document.createElement('div');
@@ -1820,6 +1828,7 @@
 
   function confirmManualOutbound(productId) {
     var fp = state.finishedProducts.find(function(x) { return x.id === productId; });
+    if (fp) fp = Object.assign({}, fp);
     if (!fp) return;
 
     var qty = parseFloat(document.getElementById('mo-qty').value);
@@ -1853,11 +1862,11 @@
       created_at: now()
     };
 
-    updateInStore('finished_products', fp).then(function() {
-      return addToStore('finished_product_logs', log);
-    }).then(function() {
-      return addStockLog('finished_product', fp.id, fp.product_name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop);
-    }).then(function() {
+    batchOperations([
+      { type: 'put', store: 'finished_products', data: fp, expectedQuantity: beforeQty },
+      { type: 'add', store: 'finished_product_logs', data: log },
+      stockLogOperation('finished_product', fp.id, fp.product_name, 'outbound', -qty, beforeQty, afterQty, operator, remarkWithWorkshop)
+    ]).then(function() {
       showToast('出库成功！');
       document.getElementById('manual-outbound-modal').remove();
       return loadAllData();
@@ -2148,6 +2157,10 @@
   // 暴露到 window 供 HTML onclick 调用
   // ============================================================
   var api = {
+    retryStorage: function() {
+      storageReady = null;
+      return loadAllData().then(function() { renderPage(state.currentPage); }).catch(showStorageError);
+    },
     // 导航
     navigateTo: navigateTo,
     // 原材料
@@ -2253,7 +2266,7 @@
       // 加载数据
       loadAllData().then(function() {
         renderPage(state.currentPage);
-      });
+      }).catch(showStorageError);
     } else {
       // 切换回原系统
       newLayout.style.display = 'none';
@@ -2274,3 +2287,4 @@
   init();
 
 })();
+

@@ -1,331 +1,54 @@
-/* ═══════════════════════════════════════════════════
-   Print Template Styles - 商品装具调拨单
-   纵向打印，240mm 宽度，可调页面高度
-   ═══════════════════════════════════════════════════ */
+/* This stylesheet is sent verbatim to the isolated native print/PDF document. */
+.print-sheet{position:relative;box-sizing:border-box;background:white;color:#000;break-after:page;page-break-after:always;font-size:var(--font-size);line-height:var(--line-height)}
+.print-sheet:last-child{break-after:auto;page-break-after:auto}
+.print-sheet *{box-sizing:border-box}
+.print-sheet .sheet-body{position:absolute;transform-origin:top left;font-size:var(--font-size);line-height:var(--line-height)}
+.print-sheet header{display:flex;align-items:center;justify-content:space-between;gap:2mm;overflow-wrap:anywhere}
+.print-sheet h1{font-size:var(--title-size);line-height:1.2;margin:0;text-align:center}
+.print-sheet .document-header{padding-bottom:var(--header-gap)}
+.print-sheet .page-subtotal{padding-top:var(--table-gap)}
+.print-sheet .last-footer{padding-top:var(--footer-gap)}
+.print-sheet .document-info{display:grid;grid-template-columns:1fr 1.4fr;border-top:0.2mm solid black;border-left:0.2mm solid black}
+.print-sheet .document-info>div{border-bottom:0.2mm solid black;border-right:0.2mm solid black;padding:var(--cell-padding);overflow-wrap:anywhere;min-width:0}
+.print-sheet .items-table{table-layout:fixed;border-collapse:collapse;margin:0;width:100%;font-size:inherit;line-height:inherit}
+.print-sheet .items-table td,.print-sheet .items-table th{border:0.2mm solid black;padding:var(--cell-padding);vertical-align:top;overflow-wrap:anywhere;word-break:break-all;text-align:center;font-size:inherit;line-height:inherit}
+.print-sheet .items-table [data-column="name"]{text-align:left}
+.print-sheet .summary{display:flex;justify-content:space-between;gap:2mm;padding:0.4mm 0;border-bottom:0.2mm solid black;overflow-wrap:anywhere}
+.print-sheet .document-signatures{display:flex;flex-wrap:wrap;justify-content:space-between;gap:1mm;padding-top:1mm}
+.print-sheet .document-signatures>span{min-width:0;overflow-wrap:anywhere}
+.print-sheet .document-remark{overflow-wrap:anywhere;padding-top:0.5mm;white-space:pre-wrap}
+.print-sheet .document-page-number{text-align:right;min-height:1px;font-size:8pt;line-height:1.2;white-space:nowrap}
+.print-sheet.without-borders .document-info,.print-sheet.without-borders .document-info>div,.print-sheet.without-borders td,.print-sheet.without-borders th,.print-sheet.without-borders .summary{border-color:transparent}
+.print-sheet .calibration{font-size:9pt;line-height:1.4}
+.print-sheet .calibration-ruler{height:8mm;border-top:0.25mm solid black;margin-top:3mm;position:relative;font-size:7pt}
+.print-sheet .calibration-ruler i{position:absolute;top:0;border-left:0.2mm solid black;height:3mm;padding-top:3mm;font-style:normal}
+.print-sheet .calibration-cross{margin-top:4mm;border-top:0.2mm dashed black;border-left:0.2mm dashed black;padding:2mm}
+.print-workspace{background:#e8edf1;min-height:100vh;padding:12px;color:#152438}
+.print-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px;background:white;border-radius:8px;margin-bottom:12px}
+.print-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px;align-items:start}
+.print-settings{background:white;padding:14px;border-radius:8px;max-height:calc(100vh - 100px);overflow:auto;font:13px/1.5 system-ui,sans-serif}
+.print-settings h3{margin:16px 0 8px;font-size:14px}
+.print-settings h3:first-child{margin-top:0}
+.print-settings label{display:flex;align-items:center;justify-content:space-between;gap:5px;margin:6px 0}
+.print-settings input:not([type=checkbox]),.print-settings select{width:130px;padding:4px;border:1px solid #bbc7d0;border-radius:4px;color:#152438;background:#fff}
+.print-settings input[type=number]{width:80px}
+.print-settings .setting-buttons{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.print-settings button,.print-toolbar button{padding:5px 9px;border:1px solid #b4c2ce;border-radius:4px;background:#fff;color:#152438;cursor:pointer}
+.print-settings button:disabled,.print-toolbar button:disabled{opacity:.45;cursor:not-allowed}
+.print-settings .column-control{padding:6px 0;border-bottom:1px solid #dde5ea}
+.print-settings .column-control label{margin:0}
+.print-settings .hint{font-size:12px;color:#526575}
+.print-preview{overflow:auto;padding:16px;min-height:400px;background:#cbd3da}
+.print-preview .print-sheet{box-shadow:0 3px 12px #0003;margin-bottom:16px}
+.print-preview .preview-zoom{transform-origin:top left}
+.print-measurement{position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none}
+.print-status{padding:8px 12px;background:#fff;border-radius:4px;margin-bottom:12px;overflow-wrap:anywhere}
+.print-error{color:#a51717;background:#fff0ee}
+@media(max-width:900px){.print-layout{grid-template-columns:280px minmax(0,1fr)}}
+@media print{.no-print{display:none!important}html,body{margin:0!important;padding:0!important;background:white!important}.print-sheet{margin:0!important;box-shadow:none!important}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 
-@page {
-  size: 240mm var(--page-height, 95mm);
-  margin: 0;
-}
-
-@media print {
-  html {
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-
-  .no-print {
-    display: none !important;
-  }
-
-  body {
-    background: #fff !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-
-  .print-page-wrapper {
-    padding: 0 !important;
-    background: #fff !important;
-  }
-
-  .print-area {
-    padding: 0 !important;
-  }
-
-  .print-page {
-    box-shadow: none !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    page-break-inside: avoid;
-    min-height: var(--page-height, 95mm) !important;
-    height: var(--page-height, 95mm) !important;
-  }
-
-  .print-page:last-child {
-    page-break-after: avoid;
-  }
-
-  * {
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-    color-adjust: exact !important;
-  }
-
-  .print-page table,
-  .print-page table td,
-  .print-page table th {
-    border-color: #000 !important;
-    border-style: solid !important;
-  }
-
-  .print-page .print-header {
-    border-bottom-color: #000 !important;
-  }
-
-  .print-page .page-number {
-    color: #000 !important;
-  }
-}
-
-/* ── Print Page Wrapper ── */
-.print-page-wrapper {
-  background: #e8e8e8;
-  min-height: 100vh;
-  padding: 16px;
-}
-
-/* ── Toolbar (screen only) ── */
-.toolbar {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-  padding: 12px 20px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-}
-
-/* ── Print Page ── */
-.print-page {
-  width: 238mm;
-  min-height: var(--page-height, 95mm);
-  margin: 0 auto;
-  padding: 0;
-  background: #fff;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
-  font-family: SimSun, '宋体', 'Noto Serif CJK SC', serif;
-  color: #000;
-  font-size: 16px;
-  line-height: 1.5;
-}
-
-/* ── Header ── */
-.print-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 0;
-  border-bottom: 0.5px solid #000;
-  padding: 0;
-  min-height: 0;
-  line-height: 1.1;
-  margin-top: 0;
-}
-
-.print-header-left {
-  flex: 1;
-}
-
-.print-header-center {
-  flex: 1;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.print-header-right {
-  text-align: right;
-  flex: 1;
-}
-
-.company-name {
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  display: inline;
-}
-
-.print-title {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 3px;
-  display: inline;
-  margin-left: 4px;
-}
-
-.print-doc-no {
-  font-size: 16px;
-  color: #000;
-  font-weight: 700;
-}
-
-/* ── Info Table ── */
-.info-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 2px 0;
-}
-
-.info-table td {
-  border: 0.25px solid #000;
-  padding: 0 3px;
-  font-size: 15px;
-  height: 16px;
-  line-height: 1.35;
-}
-
-.info-table .info-label {
-  background: #f8f8f8;
-  font-weight: 700;
-  width: 70px;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.info-table .info-value {
-  text-align: left;
-  min-width: 80px;
-}
-
-/* ── Items Table ── */
-.items-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 2px 0;
-  table-layout: fixed;
-}
-
-.items-table thead th {
-  border: 0.25px solid #000;
-  padding: 1px 2px;
-  font-size: 15px;
-  font-weight: 700;
-  text-align: center;
-  background: #f8f8f8;
-  line-height: 1.4;
-}
-
-.items-table tbody td {
-  border: 0.25px solid #000;
-  padding: 0 3px;
-  font-size: 15px;
-  line-height: 1.35;
-  overflow: hidden;
-  word-break: break-all;
-  height: 16px;
-}
-
-.items-table tbody tr:nth-child(even) {
-  background: #fcfcfc;
-}
-
-.items-table .col-seq {
-  width: 10mm;
-  text-align: center;
-}
-
-.items-table .col-name {
-  text-align: left;
-  width: 38mm;
-}
-
-.items-table .col-name .product-code {
-  color: #000;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.items-table .col-spec {
-  width: 15mm;
-  text-align: center;
-}
-
-.items-table .col-pkg {
-  width: 13mm;
-  text-align: center;
-}
-
-.items-table .col-qty {
-  width: 13mm;
-  text-align: center;
-}
-
-.items-table .col-price {
-  width: 18mm;
-  text-align: right;
-  padding-right: 2px !important;
-}
-
-.items-table .col-amount {
-  width: 20mm;
-  text-align: right;
-  padding-right: 2px !important;
-}
-
-.items-table .col-sign {
-  width: 22mm;
-  text-align: center;
-  min-height: 14px;
-}
-
-.items-table tfoot td {
-  border: 0.25px solid #000;
-  padding: 1px 3px;
-  font-weight: 700;
-  font-size: 15px;
-  text-align: center;
-  line-height: 1.4;
-}
-
-.items-table tfoot tr:first-child td {
-  border-top: 0.5px double #000;
-}
-
-.items-table tfoot .col-price {
-  text-align: center;
-}
-
-.items-table tfoot .col-amount {
-  text-align: right;
-  padding-right: 2px !important;
-}
-
-/* ── Sign Section ── */
-.sign-section {
-  margin: 8px 0 0 0;
-}
-
-.sign-row {
-  display: flex;
-  flex-wrap: wrap;
-  border: 0;
-}
-
-.sign-field {
-  flex: 1;
-  min-width: 90px;
-  padding: 0 4px;
-  font-size: 15px;
-}
-
-.sign-label {
-  font-weight: 700;
-}
-
-.sign-value {
-  display: inline-block;
-  min-width: 48px;
-  border-bottom: 0.5px solid #000;
-  padding: 0 2px;
-}
-
-/* ── Footer Section ── */
-.footer-section {
-  padding: 0;
-  margin: 0;
-}
-
-.remark {
-  font-size: 13px;
-  color: #555;
-  margin: 0;
-}
-
-/* ── Page Number ── */
-.page-number {
-  text-align: right;
-  font-size: 11px;
-  color: #000;
-  margin: 0;
-  padding: 2px 4px;
-}
+.print-preview .show-paper .print-sheet{outline:1px solid #6f7b86}
+.print-preview .show-grid .print-sheet::before{content:"";position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(#1675ba22 1px,transparent 1px),linear-gradient(90deg,#1675ba22 1px,transparent 1px);background-size:5mm 5mm;z-index:2}
+.print-preview .show-printable .print-sheet::after{content:"";position:absolute;top:var(--margin-top);left:var(--margin-left);right:var(--margin-right);bottom:var(--margin-bottom);border:1px dashed #1b76aa;pointer-events:none;z-index:3}
+.print-preview .preview-screen-ruler{border-top:2px solid #294d68;font:11px/20px system-ui;margin:5px 0;color:#294d68;white-space:nowrap;display:flex;justify-content:space-between}
+.print-settings .column-control select{width:110px}
