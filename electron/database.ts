@@ -5,38 +5,60 @@ import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
 
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
+let sqlModule: Awaited<ReturnType<typeof initSqlJs>> | null = null
+let transactionDepth = 0
+let dirty = false
+let fileSequence = 0
+let recoveryNotice: string | null = null
+export function getDatabaseRecoveryNotice(): string | null { return recoveryNotice }
+
 
 export async function initDatabase(databasePath: string): Promise<void> {
-  // Locate sql-wasm.wasm - works both in dev and packaged
-  const wasmPath = path.join(app.getAppPath(), 'resources', 'sql-wasm.wasm')
-  const SQL = await initSqlJs({
-    locateFile: (file: string) => {
-      if (fs.existsSync(wasmPath)) {
-        return wasmPath
-      }
-      // Fallback to node_modules for dev
-      return path.join(__dirname, '../node_modules/sql.js/dist/', file)
-    },
-  })
+  const wasmCandidates = [
+    path.join(process.resourcesPath || '', 'sql-wasm.wasm'),
+    path.join(app.getAppPath(), 'resources', 'sql-wasm.wasm'),
+    path.join(app.getAppPath(), 'node_modules/sql.js/dist/sql-wasm.wasm'),
+    path.join(__dirname, '../node_modules/sql.js/dist/sql-wasm.wasm'),
+  ]
+  const SQL = await initSqlJs({ locateFile: () => {
+    const found = wasmCandidates.find(candidate => fs.existsSync(candidate))
+    if (!found) throw new Error('找不到 SQLite 运行文件 sql-wasm.wasm，请重新安装软件。')
+    return found
+  } })
+  sqlModule = SQL
+  if (db) db.close()
   dbPath = databasePath
-
-  // Ensure directory exists
-  const dir = path.dirname(dbPath)
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
+  transactionDepth = 0
+  dirty = false
+  recoveryNotice = null
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+  const readValid = (file: string) => {
+    const candidate = new SQL.Database(fs.readFileSync(file))
+    try {
+      if (candidate.exec('PRAGMA integrity_check')[0]?.values[0]?.[0] !== 'ok') throw new Error('数据库完整性检查失败')
+      return candidate
+    } catch (error) { candidate.close(); throw error }
   }
-
-  // Open existing DB or create new one
   if (fs.existsSync(dbPath)) {
-    const buffer = fs.readFileSync(dbPath)
-    db = new SQL.Database(buffer)
-  } else {
-    db = new SQL.Database()
-  }
+    try { db = readValid(dbPath) }
+    catch (cause) {
+      const backup = dbPath + '.bak'
+      if (!fs.existsSync(backup)) throw new Error('数据库无法读取，且没有可恢复备份；原文件已保留。请联系维护人员。')
+      const recovered = readValid(backup)
+      const corrupt = dbPath + '.corrupt-' + Date.now() + '-' + (++fileSequence)
+      fs.copyFileSync(dbPath, corrupt)
+      const temp = dbPath + '.recovery-' + (++fileSequence)
+      try { fs.copyFileSync(backup, temp); fs.renameSync(temp, dbPath) }
+      catch (error) { recovered.close(); if (fs.existsSync(temp)) fs.unlinkSync(temp); throw error }
+      db = recovered
+      recoveryNotice = `数据库损坏，已恢复上次成功保存前的备份。损坏文件保留在：${corrupt}。请核对最近录入的订单。`
+    }
+  } else db = new SQL.Database()
 
-  db.run('PRAGMA foreign_keys = ON')
+  withTransaction(() => {
+  db!.run('PRAGMA foreign_keys = ON')
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       documentNo TEXT NOT NULL DEFAULT '',
@@ -62,7 +84,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       brand TEXT NOT NULL DEFAULT '',
@@ -75,7 +97,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS price_tables (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL DEFAULT '',
@@ -85,7 +107,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       code TEXT NOT NULL DEFAULT '',
@@ -98,7 +120,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS order_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       orderId INTEGER NOT NULL,
@@ -115,7 +137,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS price_table_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       priceTableId INTEGER NOT NULL DEFAULT 0,
@@ -126,7 +148,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS price_change_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       priceTableId INTEGER NOT NULL DEFAULT 0,
@@ -138,7 +160,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
   `)
 
   // ── Settings table (key-value store for print settings, etc.) ──
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL DEFAULT ''
@@ -147,7 +169,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
 
   // ── New tables: workshops, raw materials, inventory ──
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS workshops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL DEFAULT '',
@@ -158,7 +180,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS raw_materials (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       materialCode TEXT NOT NULL DEFAULT '',
@@ -170,7 +192,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS material_inbound (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       inboundNo TEXT NOT NULL DEFAULT '',
@@ -183,7 +205,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS material_outbound (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       outboundNo TEXT NOT NULL DEFAULT '',
@@ -197,7 +219,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS product_inbound (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       inboundNo TEXT NOT NULL DEFAULT '',
@@ -211,7 +233,7 @@ export async function initDatabase(databasePath: string): Promise<void> {
     )
   `)
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS inventory_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       itemType TEXT NOT NULL DEFAULT '',  -- 'raw_material' / 'product'
@@ -228,16 +250,24 @@ export async function initDatabase(databasePath: string): Promise<void> {
   `)
 
   // ── Migration: add missing columns ──
-  try { db.run('ALTER TABLE customers ADD COLUMN remark TEXT NOT NULL DEFAULT \'\'') } catch {}
-  try { db.run('ALTER TABLE customers ADD COLUMN priceTableId INTEGER NOT NULL DEFAULT 0') } catch {}
-  try { db.run('ALTER TABLE price_change_log ADD COLUMN priceTableId INTEGER NOT NULL DEFAULT 0') } catch {}
-  try { db.run('ALTER TABLE price_change_log ADD COLUMN productCode TEXT NOT NULL DEFAULT \'\'') } catch {}
-  try { db.run('ALTER TABLE price_change_log ADD COLUMN oldPrice REAL NOT NULL DEFAULT 0') } catch {}
-  try { db.run('ALTER TABLE price_change_log ADD COLUMN newPrice REAL NOT NULL DEFAULT 0') } catch {}
-  try { db.run('ALTER TABLE price_change_log ADD COLUMN changedAt TEXT NOT NULL DEFAULT (datetime(\'now\',\'localtime\'))') } catch {}
-  try { db.run('ALTER TABLE products ADD COLUMN packageSpec TEXT NOT NULL DEFAULT \'\'') } catch {}
-  try { db.run('ALTER TABLE products ADD COLUMN brand TEXT NOT NULL DEFAULT \'\'') } catch {}
-  try { db.run('ALTER TABLE products ADD COLUMN stockQuantity REAL NOT NULL DEFAULT 0') } catch {}
+  try { db!.run('ALTER TABLE customers ADD COLUMN remark TEXT NOT NULL DEFAULT \'\'') } catch {}
+  try { db!.run('ALTER TABLE customers ADD COLUMN priceTableId INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db!.run('ALTER TABLE price_change_log ADD COLUMN priceTableId INTEGER NOT NULL DEFAULT 0') } catch {}
+  try { db!.run('ALTER TABLE price_change_log ADD COLUMN productCode TEXT NOT NULL DEFAULT \'\'') } catch {}
+  try { db!.run('ALTER TABLE price_change_log ADD COLUMN oldPrice REAL NOT NULL DEFAULT 0') } catch {}
+  try { db!.run('ALTER TABLE price_change_log ADD COLUMN newPrice REAL NOT NULL DEFAULT 0') } catch {}
+  try { db!.run('ALTER TABLE price_change_log ADD COLUMN changedAt TEXT NOT NULL DEFAULT (datetime(\'now\',\'localtime\'))') } catch {}
+  try { db!.run('ALTER TABLE products ADD COLUMN packageSpec TEXT NOT NULL DEFAULT \'\'') } catch {}
+  try { db!.run('ALTER TABLE products ADD COLUMN brand TEXT NOT NULL DEFAULT \'\'') } catch {}
+  try { db!.run('ALTER TABLE products ADD COLUMN stockQuantity REAL NOT NULL DEFAULT 0') } catch {}
+
+  try { db!.run('ALTER TABLE order_items ADD COLUMN packageSpec TEXT') } catch {}
+  try { db!.run('ALTER TABLE orders ADD COLUMN customerId INTEGER') } catch {}
+  db!.run('CREATE INDEX IF NOT EXISTS idx_orders_date ON orders(date)')
+  db!.run('CREATE INDEX IF NOT EXISTS idx_orders_document ON orders(documentNo)')
+  db!.run('CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(orderId)')
+  db!.run('CREATE INDEX IF NOT EXISTS idx_products_code ON products(productCode)')
+  db!.run('CREATE INDEX IF NOT EXISTS idx_customer_code ON customers(code)')
 
   // ── Ensure default price table exists ──
   let defaultTable = queryOne('SELECT id FROM price_tables WHERE isDefault = 1')
@@ -267,7 +297,8 @@ export async function initDatabase(databasePath: string): Promise<void> {
     seedDefaultData(defaultTable.id)
   }
 
-  saveDb()
+  dirty = true
+  })
   console.log(`Database initialized at: ${dbPath}`)
 }
 
@@ -347,56 +378,122 @@ function seedDefaultData(defaultTableId: number): void {
   console.log(`Seeded ${products.length} products and ${customers.length} customers`)
 }
 
+function exportBytes(): Uint8Array {
+  const bytes = getDb().export()
+  getDb().run('PRAGMA foreign_keys = ON')
+  return bytes
+}
+
 function saveDb(): void {
-  if (db && dbPath) {
-    const data = db.export()
-    const buffer = Buffer.from(data)
-    fs.writeFileSync(dbPath, buffer)
+  if (!db || !dbPath) return
+  const buffer = Buffer.from(exportBytes())
+  const temp = `${dbPath}.tmp-${process.pid}-${++fileSequence}`
+  const backupTemp = temp + '.bak'
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(temp, 'wx', 0o600)
+    fs.writeFileSync(fd, buffer)
+    fs.fsyncSync(fd)
+    fs.closeSync(fd); fd = undefined
+    if (fs.existsSync(dbPath)) {
+      fs.copyFileSync(dbPath, backupTemp)
+      fs.renameSync(backupTemp, dbPath + '.bak')
+    }
+    fs.renameSync(temp, dbPath)
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+    for (const file of [temp, backupTemp]) if (fs.existsSync(file)) fs.unlinkSync(file)
   }
 }
 
-export function getDb(): SqlJsDatabase {
-  if (!db) {
-    throw new Error('Database not initialized')
+/** All functions passed here must be synchronous: no IPC/UI awaits in transactions. */
+export function withTransaction<T>(fn: () => T): T {
+  if (transactionDepth > 0) {
+    const savepoint = `nested_${transactionDepth}`
+    const wasDirty = dirty
+    getDb().run(`SAVEPOINT ${savepoint}`)
+    transactionDepth++
+    try {
+      const result = fn()
+      if (result && typeof (result as any).then === 'function') throw new Error('数据库事务不能包含异步操作')
+      getDb().run(`RELEASE SAVEPOINT ${savepoint}`)
+      return result
+    } catch (error) {
+      getDb().run(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+      getDb().run(`RELEASE SAVEPOINT ${savepoint}`)
+      dirty = wasDirty
+      throw error
+    } finally { transactionDepth-- }
   }
+  const snapshot = exportBytes()
+  const wasDirty = dirty
+  transactionDepth = 1
+  getDb().run('BEGIN')
+  try {
+    const result = fn()
+    if (result && typeof (result as any).then === 'function') throw new Error('数据库事务不能包含异步操作')
+    getDb().run('COMMIT')
+    transactionDepth = 0
+    if (dirty) saveDb()
+    dirty = false
+    return result
+  } catch (error) {
+    db!.close()
+    db = new sqlModule!.Database(snapshot)
+    db.run('PRAGMA foreign_keys = ON')
+    transactionDepth = 0
+    dirty = wasDirty
+    throw error
+  }
+}
+
+export function backupDatabase(label = 'manual'): string {
+  if (transactionDepth) throw new Error('请在事务开始前创建备份')
+  if (!db || !dbPath || !fs.existsSync(dbPath)) throw new Error('数据库尚未保存，无法备份')
+  const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60)
+  const destination = `${dbPath}.backup-${safeLabel}-${Date.now()}-${++fileSequence}.db`
+  fs.copyFileSync(dbPath, destination, fs.constants.COPYFILE_EXCL)
+  return destination
+}
+
+export function getDb(): SqlJsDatabase {
+  if (!db) throw new Error('Database not initialized')
   return db
 }
 
 export function persistDb(): void {
-  saveDb()
+  if (transactionDepth) { dirty = true; return }
+  withTransaction(() => { dirty = true })
 }
 
-// Helper: run a query and return all rows as objects
 export function queryAll(sql: string, params: any[] = []): any[] {
   const stmt = getDb().prepare(sql)
-  stmt.bind(params)
-  const rows: any[] = []
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject())
-  }
-  stmt.free()
-  return rows
+  try {
+    stmt.bind(params)
+    const rows: any[] = []
+    while (stmt.step()) rows.push(stmt.getAsObject())
+    return rows
+  } finally { stmt.free() }
 }
 
-// Helper: run a query and return first row as object
 export function queryOne(sql: string, params: any[] = []): any | null {
   const rows = queryAll(sql, params)
   return rows.length > 0 ? rows[0] : null
 }
 
-// Helper: run an INSERT/UPDATE/DELETE and return info
 export function run(sql: string, params: any[] = []): { changes: number; lastInsertRowid: number } {
-  const db = getDb()
-  db.run(sql, params)
-  const lastInsertRowid = (db.exec("SELECT last_insert_rowid() as id")[0]?.values[0]?.[0] as number) || 0
-  saveDb()
-  return { changes: db.getRowsModified(), lastInsertRowid }
+  if (!transactionDepth) return withTransaction(() => run(sql, params))
+  const database = getDb()
+  database.run(sql, params)
+  const changes = database.getRowsModified()
+  const lastInsertRowid = (database.exec('SELECT last_insert_rowid() as id')[0]?.values[0]?.[0] as number) || 0
+  dirty = true
+  return { changes, lastInsertRowid }
 }
 
 export function closeDatabase(): void {
-  if (db) {
-    saveDb()
-    db.close()
-    db = null
-  }
+  if (!db) return
+  if (transactionDepth) throw new Error('事务执行中不能关闭数据库')
+  if (dirty) saveDb()
+  db.close(); db = null
 }

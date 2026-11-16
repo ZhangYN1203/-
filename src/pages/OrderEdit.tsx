@@ -1,14 +1,14 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  fetchOrderById, saveOrder, editOrder,
-  saveOrderItem, fetchOrderItems, removeOrderItem,
+  fetchOrderById, saveOrderWithItems,
   searchProducts, searchCustomers, getCustomerPrices, initCustomerPrices,
   generateDocumentNo,
 } from '../utils/ipc'
 import type { Order, OrderItem, Product, Customer, CustomerPrice } from '../types'
 
 interface EditableItem {
+  snapshotNeedsReview?: boolean
   _tempId: number
   id?: number
   productCode: string
@@ -40,10 +40,12 @@ function createEmptyItem(): EditableItem {
   }
 }
 
+function localToday() { const now = new Date(); return [now.getFullYear(), String(now.getMonth()+1).padStart(2,'0'), String(now.getDate()).padStart(2,'0')].join('-') }
+
 const emptyOrder: Partial<Order> = {
   documentNo: '',
   orderNo: '',
-  date: new Date().toISOString().slice(0, 10),
+  date: localToday(),
   sender: '徐州解忧故里农业科技有限公司',
   senderPhone: '',
   receiver: '',
@@ -74,6 +76,21 @@ const OrderEdit: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [orderId, setOrderId] = useState<number | null>(null)
+  const dirtyRef = useRef(false)
+  const markDirty = () => { dirtyRef.current = true }
+  const leave = (destination: string) => {
+    if (saving) return
+    if (dirtyRef.current && !window.confirm('订单有未保存的修改，确定放弃修改并离开吗？')) return
+    dirtyRef.current = false
+    navigate(destination)
+  }
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (dirtyRef.current) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => window.removeEventListener('beforeunload', beforeUnload)
+  }, [])
 
   // ── Customer info (bound together) ──
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null)
@@ -119,11 +136,13 @@ const OrderEdit: React.FC = () => {
   }, [])
 
   const selectCustomer = useCallback(async (customer: Customer) => {
+    markDirty()
     setSelectedCustomer(customer)
     setCustomerCodeSearch(`${customer.code} - ${customer.name}`)
     setShowCustomerDropdown(false)
     setOrder(prev => ({
       ...prev,
+      customerId: customer.id,
       receiver: customer.name,
       receiverContact: customer.contact || '',
       receiverPhone: customer.phone || '',
@@ -161,6 +180,7 @@ const OrderEdit: React.FC = () => {
   }, [])
 
   const selectProduct = useCallback((index: number, product: Product) => {
+    markDirty()
     // Check for duplicate product in the order (skip the current index being edited)
     setItems(prev => {
       const duplicate = prev.find((it, i) => i !== index && it.productCode === product.productCode)
@@ -176,6 +196,7 @@ const OrderEdit: React.FC = () => {
       item.productName = product.productName
       item.specification = product.specification
       item.packageSpec = product.packageSpec || ''
+      item.snapshotNeedsReview = false
       item.unit = product.unit
       item.price = price
       item.amount = Math.round((item.quantity || 0) * price * 100) / 100
@@ -206,6 +227,7 @@ const OrderEdit: React.FC = () => {
       }
 
       setOrder({
+        customerId: data.customerId,
         documentNo: data.documentNo,
         orderNo: data.orderNo,
         date: data.date,
@@ -248,7 +270,8 @@ const OrderEdit: React.FC = () => {
           productCode: it.productCode,
           productName: it.productName,
           specification: it.specification,
-          packageSpec: (it as any).packageSpec || '',
+          packageSpec: it.packageSpec || '',
+          snapshotNeedsReview: it.snapshotNeedsReview,
           unit: it.unit,
           quantity: it.quantity,
           price: it.price,
@@ -268,14 +291,17 @@ const OrderEdit: React.FC = () => {
   }, [loadOrder])
 
   const updateField = (field: string, value: string) => {
+    markDirty()
     setOrder(prev => ({ ...prev, [field]: value }))
   }
 
   const updateItem = (tempId: number, field: keyof EditableItem, value: string | number) => {
+    markDirty()
     setItems(prev =>
       prev.map(it => {
         if (it._tempId !== tempId) return it
         const updated = { ...it, [field]: value }
+        if (field === 'packageSpec') updated.snapshotNeedsReview = false
         if (field === 'quantity' || field === 'price') {
           const qty = field === 'quantity' ? Number(value) : it.quantity
           const prc = field === 'price' ? Number(value) : it.price
@@ -287,6 +313,7 @@ const OrderEdit: React.FC = () => {
   }
 
   const addItem = () => {
+    markDirty()
     const newItem = createEmptyItem()
     const newIndex = items.length
     setItems(prev => [...prev, newItem])
@@ -300,75 +327,25 @@ const OrderEdit: React.FC = () => {
   }
 
   const removeItem = (tempId: number) => {
-    const item = items.find(it => it._tempId === tempId)
-    if (item?.id && item.id > 0) {
-      removeOrderItem(item.id).catch(console.error)
-    }
+    markDirty()
     setItems(prev => prev.filter(it => it._tempId !== tempId))
   }
 
   const handleSave = async () => {
+    if (saving) return
     try {
       setSaving(true)
       setError('')
-
-      const dataToSave = {
-        ...order,
-        date: order.date || new Date().toISOString().slice(0, 10),
-      }
-
-      if (isNew) {
-        const result = await saveOrder(dataToSave)
-        const newId = result.id
-
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i]
-          await saveOrderItem({
-            orderId: newId,
-            productCode: item.productCode,
-            productName: item.productName,
-            specification: item.specification,
-            unit: item.unit,
-            quantity: item.quantity,
-            price: item.price,
-            amount: item.amount,
-            remark: item.remark,
-            sortOrder: i,
-          })
-        }
-
-        navigate('/')
-      } else if (orderId) {
-        await editOrder(orderId, dataToSave)
-
-        const existingItems = await fetchOrderItems(orderId)
-        for (const item of existingItems) {
-          await removeOrderItem(item.id)
-        }
-
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i]
-          await saveOrderItem({
-            orderId,
-            productCode: item.productCode,
-            productName: item.productName,
-            specification: item.specification,
-            unit: item.unit,
-            quantity: item.quantity,
-            price: item.price,
-            amount: item.amount,
-            remark: item.remark,
-            sortOrder: i,
-          })
-        }
-
-        navigate('/')
-      }
+      await saveOrderWithItems({
+        id: isNew ? undefined : orderId || undefined,
+        order: { ...order, date: order.date || localToday() },
+        items: items.map(({ _tempId, ...item }, index) => ({ ...item, sortOrder: index })),
+      })
+      dirtyRef.current = false
+      navigate('/')
     } catch (err: any) {
-      setError(err.message || '保存失败')
-    } finally {
-      setSaving(false)
-    }
+      setError(err.message || '保存失败，原订单未更改，请检查后重试')
+    } finally { setSaving(false) }
   }
 
   const totalQuantity = items.reduce((sum, it) => sum + (it.quantity || 0), 0)
@@ -386,10 +363,10 @@ const OrderEdit: React.FC = () => {
       <div className="page-header">
         <h1>{isNew ? '新建订单' : '编辑订单'}</h1>
         <div className="btn-group">
-          <button className="btn" onClick={() => navigate('/')}>
+          <button className="btn" onClick={() => leave('/')}>
             返回列表
           </button>
-          <button className="btn" onClick={() => navigate('/product-manager')}>
+          <button className="btn" onClick={() => leave('/product-manager')}>
             价格管理
           </button>
           <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
@@ -736,8 +713,7 @@ const OrderEdit: React.FC = () => {
                         <input
                           value={item.packageSpec}
                           onChange={e => updateItem(item._tempId, 'packageSpec', e.target.value)}
-                          readOnly
-                          style={{ background: '#f5f5f5', color: '#666' }}
+                          title={item.snapshotNeedsReview ? '历史订单未记录整箱规格，请核对实物后填写' : '订单保存时的整箱规格'}
                         />
                       </td>
                       <td>
@@ -805,10 +781,10 @@ const OrderEdit: React.FC = () => {
         </div>
 
         <div className="form-actions">
-          <button className="btn" onClick={() => navigate('/')}>
+          <button className="btn" onClick={() => leave('/')}>
             取消
           </button>
-          <button className="btn" onClick={() => navigate('/product-manager')}>
+          <button className="btn" onClick={() => leave('/product-manager')}>
             价格管理
           </button>
           <button className="btn btn-primary" onClick={handleSave} disabled={saving}>

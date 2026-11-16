@@ -1,131 +1,90 @@
 # 商品装具调拨单打印工具
 
-基于 Electron + React + TypeScript + Vite + SQLite 的 Windows 桌面应用程序，用于录入订单信息、添加商品明细、预览并打印"商品装具调拨单"。
+Windows 本地桌面软件：订单录入、客户/商品/价格表管理、调拨单打印、生产与库存管理、收发存和订单报表。使用 Electron 33、React 18、TypeScript、Vite 与 sql.js（SQLite），无需云数据库。
 
-## 技术栈
+## 开发与打包
 
-| 模块 | 技术 |
-|------|------|
-| 桌面框架 | Electron 33 |
-| 前端框架 | React 18 |
-| 语言 | TypeScript |
-| 构建工具 | Vite 6 |
-| 数据库 | SQLite (better-sqlite3) |
-| 路由 | React Router 6 |
-| 二维码 | qrcode |
-| 打包 | electron-builder |
+安装 Node.js 20.19+（推荐 22 LTS）和 npm。在项目目录执行：
 
-## 项目结构
-
-```
-order-print-tool/
-├── electron/             # Electron 主进程
-│   ├── main.ts           # 主进程入口
-│   ├── preload.ts        # 预加载脚本（IPC 桥接）
-│   ├── database.ts       # SQLite 数据库初始化
-│   └── handlers.ts       # IPC 处理器（CRUD 操作）
-├── src/                  # React 渲染进程
-│   ├── main.tsx          # 应用入口
-│   ├── App.tsx           # 路由配置
-│   ├── index.css         # 全局样式
-│   ├── types/            # TypeScript 类型定义
-│   │   └── index.ts
-│   ├── utils/            # 工具函数
-│   │   └── ipc.ts        # IPC 调用封装
-│   ├── components/       # 可复用组件
-│   │   └── ConfirmDialog.tsx
-│   ├── pages/            # 页面组件
-│   │   ├── OrderList.tsx   # 订单列表页
-│   │   ├── OrderEdit.tsx   # 订单编辑页
-│   │   └── OrderPrint.tsx  # 打印预览页
-│   └── styles/           # 样式文件
-│       └── print.css     # 打印模板样式
-├── index.html
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── tsconfig.electron.json
-└── dev.bat
+```sh
+npm ci
+npm run electron:dev
 ```
 
-## 功能
+Windows 也可双击 `dev.bat`。程序会先编译 Electron，再启动 Vite、主进程编译监视和桌面窗口。`npm run dev:web` 仅启动前端服务器；真实订单和生产数据需要 Electron 的本地接口。
 
-1. **订单列表** - 查看所有订单，支持搜索（订单号、客户名称、交货号）
-2. **新增/编辑订单** - 填写基础信息、添加商品明细、自动计算金额
-3. **打印预览** - 生成符合"商品装具调拨单"格式的 A4 横向打印页面
-4. **二维码** - 打印单自动生成含订单信息的二维码
-5. **打印** - 调用系统打印，支持选择打印机
-6. **打包 exe** - 可打包为 Windows 安装包
-
-## 打印格式
-
-- 标题：商品装具调拨单（22px 加粗居中）
-- 基础信息区：日期、发货单位、电话、承运车号、出厂时间、订单号、收货单位、收货地址、吨位、里程
-- 商品表格：序号、商品名称及规格（单位）、数量、单价、金额、签收意见
-- 底部：合计数量、二维码、制单人、复核、承运人签字、收货人签字
-- 联次说明：白色(1)-存根 红色-运费 蓝色-仓库 黄色-回执 绿色-客户留存 白色(2)-出门证
-- 字体：SimSun/宋体
-- 页尺寸：A4 landscape (@page { size: A4 landscape })
-
-## 开发
-
-### 环境要求
-
-- Node.js >= 18
-- npm >= 8
-
-### 启动开发模式
-
-```bash
-# 方式 1：Windows 批处理（推荐）
-双击 dev.bat
-
-# 方式 2：手动
-npm install
-npx tsc -p tsconfig.electron.json
-npx concurrently -k "vite" "wait-on tcp:5173 && electron ."
+```sh
+npm run typecheck       # 前端与 Electron 类型检查
+npm test                # 数据层、迁移、打印和界面测试
+npm run build           # 编译前端和 Electron，不生成安装包
+npm run electron:build  # Windows x64 NSIS 安装包，输出 release/
+npm run electron:build:dir  # Windows 可运行目录
 ```
 
-### 访问页面
+浏览器布局测试使用 Playwright：
 
-开发模式下：
-- Vite 开发服务器：http://localhost:5173
-- Electron 窗口会自动打开
-
-## 构建与打包
-
-### 构建前端
-
-```bash
-npm run build:vite
+```sh
+npx playwright install chromium
+npm run test:e2e
 ```
 
-### 编译 Electron 主进程
+也可用 `CHROMIUM_PATH` 指定已有 Chromium。浏览器测试模拟本地 IPC，核对界面和纸张排版；不连接真实打印机。Windows 打包后应再次验证驱动、字体和针式连续走纸。
 
-```bash
-npx tsc -p tsconfig.electron.json
-```
+## 打印设置与软件内校准
 
-### 打包为 Windows exe
+从订单列表进入“打印”，左侧调整设置，右侧立即更新预览。默认连续纸 **240×95mm**，并有 A4 横/竖预设。
 
-```bash
-npm run electron:build
-```
+可在软件中调整：
 
-打包完成后，安装包位于 `release/` 目录下。
+- 纸宽/纸高、四边边距、横纵偏移；数字、滑块、微调按钮，步长 0.1、0.5 或 1mm。
+- 字体、字号、标题字号、行距、单元格内边距、抬头/表格/页脚间距。
+- 商品列的宽度、顺序、对齐、换行与显隐；商品名称和数量为必选列。
+- 抬头、框线、商品编码、单位、签字、备注、页码、小计和总计；支持空白纸和预印套打模式。
+- 实际打印比例与屏幕预览缩放分别控制。屏幕缩放不改变打印尺寸，实际比例默认为 100%。
 
-### 仅打包到目录（不压缩）
+可保存、另存、重命名、删除模板，导入/导出 JSON；按打印机和纸张保存校准。设备配置覆盖纸张、边距、比例和偏移，内容字体与商品列沿用所选模板。切换打印机会提示是否存在匹配的校准。提供撤销、恢复上次保存与恢复默认。
 
-```bash
-npm run electron:build:dir
-```
+### 针式连续纸建议校准顺序
 
-## 数据库
+1. 在 Windows 打印机驱动中设置与实物一致的自定义纸型；软件选择同一打印机，输入实际纸宽和每联走纸高度。
+2. 先保持实际比例 100%，打开“校准页”，试打当前页，检查标尺和起始位置。通过横纵偏移微调对齐。
+3. 用“连续 3 页试打”检查逐页走纸。如果每张偏差逐渐变大，核对驱动纸高和软件纸高；不要只增加整体偏移。
+4. 调整字号、列宽和行距，再保存该打印机的校准，另存所需的业务模板。
+5. 需要复核版式时导出 PDF。预览、PDF 和原生打印共用同一份物理页面内容与分页结果。
 
-使用 SQLite，数据库文件存储在用户数据目录：
-- 开发环境：`%APPDATA%/order-print-tool/orders.db`
-- 生产环境：`%APPDATA%/商品装具调拨单打印工具/orders.db`
+长商品名/地址参与实际字体测量和分页；单行或页脚放不下、列宽过大、内容溢出时显示错误并阻止打印，不会暗中裁切。实际落纸仍受驱动不可打印边距、字体和走纸机械误差影响，需要实机校准。
 
-## License
+## 订单与数据可靠性
+
+- 订单头和全部商品明细一次事务保存，成功才返回列表；金额在主进程重新计算。
+- 编辑中删除商品只修改草稿；取消未保存操作不会删除原明细。保存失败保留草稿，数据库保留原整张订单。
+- 单号在保存时分配，编辑保留原单号；数量支持小数。
+- 新订单记录商品名称、规格、整箱规格、单位、价格和客户资料快照，之后调整目录不会改变历史重打内容。
+- 升级前未保存的整箱规格无法恢复历史真实值，保留为空并提示核对；可在订单编辑中明确补充。
+- 已关联生产任务的订单禁止删除或直接改变客户、商品和数量，避免生产记录与订单脱节。
+
+SQLite 文件位于 Electron 的 `userData/orders.db`（Windows 通常在 `%APPDATA%` 下）。批量业务操作成功后只落盘一次；使用临时文件替换，并保留 `orders.db.bak`。数据库损坏时可从有效备份恢复，保留损坏原文件并提示核对最近订单；没有有效备份时显示错误，不创建空库覆盖原数据。
+
+## 原生产数据迁移
+
+旧生产模块使用的 `ProductionManagementDB` IndexedDB 会在首次使用时备份并迁入同一个 `orders.db`。为兼容旧编号，生产记录以模块名和旧编号分区，不与原商品目录编号自动合并。
+
+- 先创建 JSON 和 SQLite 备份，再在事务中导入；备份路径记录在迁移信息中。
+- 原 IndexedDB 保留，不删除。迁移失败不切换到空数据，显示错误和重试入口。
+- 重复启动不重复导入，不覆盖已在 SQLite 中编辑的数据。
+- 新生产任务选择真实订单并记录快照；旧手填单号只在唯一匹配时建立关联，无法匹配的明确标为未关联。
+- 领料、成品入库、出库和库存日志在同一批次提交，并校验库存和过期的页面数据。
+
+## 代码位置
+
+- `electron/database.ts`：数据库初始化、事务、原子落盘与备份恢复。
+- `electron/handlers.ts`：订单、客户、商品、价格与统计业务。
+- `electron/production-store.ts`：生产模块持久化、迁移和原子批次。
+- `electron/print-model.ts`、`print-service.ts`：打印契约校验和原生打印/PDF。
+- `electron/main.ts`、`preload.ts`：桌面窗口和白名单 IPC。
+- `src/pages/OrderEdit.tsx`：订单草稿与整单保存。
+- `src/pages/OrderPrint.tsx`、`src/printing/`：模板、校准、物理预览和分页。
+- `public/new-modules.js`：生产库存界面，数据访问通过本地 IPC。
+- `tests/`：业务、界面、打印及浏览器回归测试。
 
 MIT

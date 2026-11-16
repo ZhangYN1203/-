@@ -1,9 +1,12 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'path'
 import fs from 'fs'
-import { initDatabase } from './database'
+import { initDatabase, closeDatabase, withTransaction, getDatabaseRecoveryNotice } from './database'
+import { printDocument, listPrinters } from './print-service'
+import { initProductionStore, getProductionStatus, migrateProductionData, getProductionRecords, getProductionRecord, applyProductionOperations } from './production-store'
 import {
   createOrder,
+  saveOrderWithItems,
   getOrders,
   getOrderById,
   updateOrder,
@@ -72,6 +75,15 @@ import {
 } from './handlers'
 
 let mainWindow: BrowserWindow | null = null
+// sql.js is an in-memory database: only one process may own this user's file.
+const ownsInstance = app.requestSingleInstanceLock()
+if (!ownsInstance) app.quit()
+else app.on('second-instance', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -87,8 +99,9 @@ function createWindow() {
     },
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+  const devServer = process.env.VITE_DEV_SERVER_URL || (!app.isPackaged ? 'http://127.0.0.1:5173' : undefined)
+  if (devServer) {
+    mainWindow.loadURL(devServer)
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -98,12 +111,6 @@ function createWindow() {
     mainWindow = null
   })
 
-  // Inject print settings UI (页面高度滑杆)
-  function injectPrintSettings() {
-    mainWindow!.webContents.executeJavaScript(`if(!window.__pd){(function(){window.__pd={};var o=new MutationObserver(function(){if(!window.location.pathname.match(/\\/orders\\/\\d+\\/print/))return;var t=document.querySelector('.no-print.toolbar');if(!t||document.querySelector('.print-height-control'))return;(async function(){var s={};try{s=await window.electronAPI.getPrintSettings()}catch(e){}var h=parseInt(s.printPageHeight||'95',10);document.documentElement.style.setProperty('--page-height',h+'mm');var g=document.createElement('span');g.className='print-height-control';g.style.cssText='display:inline-flex;align-items:center;gap:8px;margin-left:auto;font-size:13px;';var l=document.createElement('span');l.textContent='页面高度:';l.style.cssText='color:#666;white-space:nowrap;';var s2=document.createElement('input');s2.type='range';s2.min='70';s2.max='150';s2.step='1';s2.value=h;s2.style.cssText='width:100px;height:20px;margin:0;cursor:pointer;';var d=document.createElement('span');d.textContent=h+'mm';d.style.cssText='color:#333;font-weight:600;min-width:45px;text-align:right;';var db=null;s2.addEventListener('input',function(){var v=parseInt(this.value,10);d.textContent=v+'mm';document.documentElement.style.setProperty('--page-height',v+'mm');if(db)clearTimeout(db);db=setTimeout(function(){try{window.electronAPI.setPrintSettings({printPageHeight:String(v)})}catch(e){}},300)});g.appendChild(l);g.appendChild(s2);g.appendChild(d);t.appendChild(g)})()});o.observe(document.body,{childList:true,subtree:true})})()}`).catch(function() {})
-  }
-  mainWindow.webContents.on('did-finish-load', function() { injectPrintSettings() })
-  mainWindow.webContents.on('did-navigate-in-page', function() { injectPrintSettings() })
 }
 
 function registerIpcHandlers() {
@@ -117,15 +124,15 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:createOrder', async (_event, data: any) => {
-    return createOrder(data)
+    return withTransaction(() => createOrder(data))
   })
 
   ipcMain.handle('db:updateOrder', async (_event, id: number, data: any) => {
-    return updateOrder(id, data)
+    return withTransaction(() => updateOrder(id, data))
   })
 
   ipcMain.handle('db:deleteOrder', async (_event, id: number) => {
-    return deleteOrder(id)
+    return withTransaction(() => deleteOrder(id))
   })
 
   // Order items handlers
@@ -134,15 +141,15 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:createOrderItem', async (_event, data: any) => {
-    return createOrderItem(data)
+    return withTransaction(() => createOrderItem(data))
   })
 
   ipcMain.handle('db:updateOrderItem', async (_event, id: number, data: any) => {
-    return updateOrderItem(id, data)
+    return withTransaction(() => updateOrderItem(id, data))
   })
 
   ipcMain.handle('db:deleteOrderItem', async (_event, id: number) => {
-    return deleteOrderItem(id)
+    return withTransaction(() => deleteOrderItem(id))
   })
 
   // Document number generation
@@ -150,21 +157,15 @@ function registerIpcHandlers() {
     return generateDocumentNo(date)
   })
 
-  // Print handler
-  ipcMain.handle('print:window', async (_event, _data?: any) => {
-    if (mainWindow) {
-      const settings = getPrintSettings()
-      const heightMm = parseInt(settings.printPageHeight || '95', 10)
-      const height = Math.round(heightMm * 1000)
-      mainWindow.webContents.print({
-        landscape: false,
-        pageSize: { width: 240000, height },
-        margins: { marginType: 'custom', top: 0, bottom: 0, left: 0, right: 0 },
-        printBackground: true,
-        silent: false,
-      })
-    }
-  })
+  ipcMain.handle('db:saveOrderWithItems', (_event, request) => saveOrderWithItems(request))
+  ipcMain.handle('print:document', (_event, request) => printDocument(request, mainWindow || undefined))
+  ipcMain.handle('print:listPrinters', () => mainWindow ? listPrinters(mainWindow) : [])
+  ipcMain.handle('print:window', () => { throw new Error('请在订单打印预览页使用打印按钮，以应用当前模板和校准设置。') })
+  ipcMain.handle('production:status', () => getProductionStatus())
+  ipcMain.handle('production:migrate', (_event, bundle) => migrateProductionData(bundle))
+  ipcMain.handle('production:list', (_event, store) => getProductionRecords(store))
+  ipcMain.handle('production:get', (_event, store, id) => getProductionRecord(store, id))
+  ipcMain.handle('production:apply', (_event, operations) => applyProductionOperations(operations))
 
   // Products & Customers
   ipcMain.handle('db:searchProducts', async (_event, keyword?: string) => {
@@ -172,15 +173,15 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:createProduct', async (_event, data: any) => {
-    return createProduct(data)
+    return withTransaction(() => createProduct(data))
   })
 
   ipcMain.handle('db:deleteProduct', async (_event, id: number) => {
-    return deleteProduct(id)
+    return withTransaction(() => deleteProduct(id))
   })
 
   ipcMain.handle('db:updateProduct', async (_event, id: number, data: any) => {
-    return updateProduct(id, data)
+    return withTransaction(() => updateProduct(id, data))
   })
 
   ipcMain.handle('db:searchCustomers', async (_event, keyword?: string) => {
@@ -197,15 +198,15 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:initCustomerPrices', async (_event, customerCode: string) => {
-    return initCustomerPrices(customerCode)
+    return withTransaction(() => initCustomerPrices(customerCode))
   })
 
   ipcMain.handle('db:updateCustomerPrice', async (_event, customerCode: string, productCode: string, newPrice: number) => {
-    return updateCustomerPrice(customerCode, productCode, newPrice)
+    return withTransaction(() => updateCustomerPrice(customerCode, productCode, newPrice))
   })
 
   ipcMain.handle('db:undoLastPriceChange', async (_event, customerCode: string) => {
-    return undoLastPriceChangeByCustomer(customerCode)
+    return withTransaction(() => undoLastPriceChangeByCustomer(customerCode))
   })
 
   ipcMain.handle('db:getPriceChangeLogs', async (_event, customerCode: string) => {
@@ -214,15 +215,15 @@ function registerIpcHandlers() {
 
   // Customer Management
   ipcMain.handle('db:createCustomer', async (_event, data: any) => {
-    return createCustomer(data)
+    return withTransaction(() => createCustomer(data))
   })
 
   ipcMain.handle('db:updateCustomer', async (_event, id: number, data: any) => {
-    return updateCustomer(id, data)
+    return withTransaction(() => updateCustomer(id, data))
   })
 
   ipcMain.handle('db:deleteCustomer', async (_event, id: number) => {
-    return deleteCustomer(id)
+    return withTransaction(() => deleteCustomer(id))
   })
 
   ipcMain.handle('db:getCustomerById', async (_event, id: number) => {
@@ -235,11 +236,11 @@ function registerIpcHandlers() {
 
   // Customer Products (legacy aliases)
   ipcMain.handle('db:addCustomerProduct', async (_event, customerCode: string, productCode: string) => {
-    return addCustomerProduct(customerCode, productCode)
+    return withTransaction(() => addCustomerProduct(customerCode, productCode))
   })
 
   ipcMain.handle('db:removeCustomerProduct', async (_event, customerCode: string, productCode: string) => {
-    return removeCustomerProduct(customerCode, productCode)
+    return withTransaction(() => removeCustomerProduct(customerCode, productCode))
   })
 
   ipcMain.handle('db:searchCustomerPrices', async (_event, customerCode: string, keyword?: string) => {
@@ -252,11 +253,11 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:createPriceTable', async (_event, name: string) => {
-    return createPriceTable(name)
+    return withTransaction(() => createPriceTable(name))
   })
 
   ipcMain.handle('db:deletePriceTable', async (_event, id: number) => {
-    return deletePriceTable(id)
+    return withTransaction(() => deletePriceTable(id))
   })
 
   ipcMain.handle('db:renamePriceTable', async (_event, id: number, name: string) => {
@@ -268,19 +269,19 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('db:updatePriceTableItem', async (_event, priceTableId: number, productCode: string, newPrice: number) => {
-    return updatePriceTableItem(priceTableId, productCode, newPrice)
+    return withTransaction(() => updatePriceTableItem(priceTableId, productCode, newPrice))
   })
 
   ipcMain.handle('db:addPriceTableProduct', async (_event, priceTableId: number, productCode: string) => {
-    return addPriceTableProduct(priceTableId, productCode)
+    return withTransaction(() => addPriceTableProduct(priceTableId, productCode))
   })
 
   ipcMain.handle('db:removePriceTableProduct', async (_event, priceTableId: number, productCode: string) => {
-    return removePriceTableProduct(priceTableId, productCode)
+    return withTransaction(() => removePriceTableProduct(priceTableId, productCode))
   })
 
   ipcMain.handle('db:undoPriceTableChange', async (_event, priceTableId: number) => {
-    return undoLastPriceChange(priceTableId)
+    return withTransaction(() => undoLastPriceChange(priceTableId))
   })
 
   ipcMain.handle('db:getPriceTableLogs', async (_event, priceTableId: number) => {
@@ -297,7 +298,7 @@ function registerIpcHandlers() {
     if (result.canceled || result.filePaths.length === 0) {
       return { success: false, message: '已取消选择文件' }
     }
-    return importExcelFromFile(result.filePaths[0])
+    return withTransaction(() => importExcelFromFile(result.filePaths[0]))
   })
 
   // Order Summary
@@ -357,17 +358,23 @@ function registerIpcHandlers() {
   ipcMain.handle('settings:set', async (_event, data: Record<string, string | number>) => setPrintSettings(data))
 }
 
-app.whenReady().then(async () => {
+if (ownsInstance) app.whenReady().then(async () => {
   const dbPath = path.join(app.getPath('userData'), 'orders.db')
   await initDatabase(dbPath)
+  initProductionStore()
   registerIpcHandlers()
   createWindow()
+  const recovery = getDatabaseRecoveryNotice()
+  if (recovery && mainWindow) await dialog.showMessageBox(mainWindow, { type: 'warning', title: '数据库备份恢复', message: recovery })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
     }
   })
+}).catch(error => {
+  dialog.showErrorBox('软件启动失败', error instanceof Error ? error.message : String(error))
+  app.quit()
 })
 
 app.on('window-all-closed', () => {
@@ -375,3 +382,5 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+app.on('before-quit', () => closeDatabase())

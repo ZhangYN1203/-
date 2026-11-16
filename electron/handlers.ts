@@ -1,34 +1,31 @@
-import { queryAll, queryOne, run } from './database'
+import { queryAll, queryOne, run, withTransaction } from './database'
+import { hasLinkedProductionOrder } from './production-store'
+import { validatePrintSettings } from './print-model'
 import fs from 'fs'
 import path from 'path'
+
+function localDate() { const now = new Date(); return [now.getFullYear(), String(now.getMonth()+1).padStart(2,'0'), String(now.getDate()).padStart(2,'0')].join('-') }
 
 // ── Auto-generate document number ──
 // Format: DB-YYYYMMDD-NNN (e.g. DB-20260627-001)
 export function generateDocumentNo(date?: string): string {
   const today = date
     ? date.replace(/-/g, '')
-    : new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    : localDate().replace(/-/g, '')
 
-  // Find the max serial for today
   const prefix = `DB-${today}-`
-  const last = queryOne(
-    "SELECT documentNo FROM orders WHERE documentNo LIKE ? ORDER BY id DESC LIMIT 1",
-    [`${prefix}%`]
-  )
-
-  let nextSeq = 1
-  if (last && last.documentNo) {
-    const parts = last.documentNo.split('-')
-    const lastSeq = parseInt(parts[parts.length - 1], 10)
-    if (!isNaN(lastSeq)) {
-      nextSeq = lastSeq + 1
-    }
-  }
+  const matches = queryAll('SELECT documentNo FROM orders WHERE documentNo LIKE ?', [`${prefix}%`])
+  const max = matches.reduce((value: number, row: any) => {
+    const suffix = row.documentNo.slice(prefix.length)
+    return /^\d+$/.test(suffix) ? Math.max(value, Number(suffix)) : value
+  }, 0)
+  const nextSeq = max + 1
 
   return `${prefix}${String(nextSeq).padStart(3, '0')}`
 }
 
 export interface OrderData {
+  customerId?: number | null
   documentNo?: string
   orderNo?: string
   date?: string
@@ -50,6 +47,8 @@ export interface OrderData {
 }
 
 export interface OrderItemData {
+  packageSpec?: string | null
+  snapshotNeedsReview?: boolean
   orderId: number
   productCode?: string
   productName?: string
@@ -65,43 +64,23 @@ export interface OrderItemData {
 // ── Orders ──
 
 export function getOrders(filters?: { search?: string }) {
-  let sql = 'SELECT * FROM orders'
+  let sql = `SELECT o.*, COALESCE(i.itemCount,0) AS itemCount, COALESCE(i.totalQuantity,0) AS totalQuantity
+    FROM orders o LEFT JOIN (SELECT orderId, COUNT(*) itemCount, SUM(quantity) totalQuantity FROM order_items GROUP BY orderId) i ON i.orderId=o.id`
   const params: any[] = []
-
   if (filters?.search) {
-    const s = `%${filters.search}%`
-    sql += ' WHERE orderNo LIKE ? OR documentNo LIKE ? OR sender LIKE ? OR receiver LIKE ?'
-    params.push(s, s, s, s)
+    sql += ' WHERE o.orderNo LIKE ? OR o.documentNo LIKE ? OR o.sender LIKE ? OR o.receiver LIKE ?'
+    params.push(...Array(4).fill(`%${filters.search}%`))
   }
-
-  sql += ' ORDER BY createdAt DESC'
-
-  const rows = queryAll(sql, params)
-
-  // Get item count and total quantity for each order
-  return rows.map((row: any) => {
-    const countResult = queryOne('SELECT COUNT(*) as count FROM order_items WHERE orderId = ?', [row.id])
-    const qtyResult = queryOne('SELECT COALESCE(SUM(quantity), 0) as total FROM order_items WHERE orderId = ?', [row.id])
-    return {
-      ...row,
-      itemCount: countResult?.count || 0,
-      totalQuantity: qtyResult?.total || 0,
-    }
-  })
+  return queryAll(sql + ' ORDER BY o.createdAt DESC, o.id DESC', params)
 }
 
 export function getOrderById(id: number) {
   const order = queryOne('SELECT * FROM orders WHERE id = ?', [id])
   if (!order) return null
 
-  const items = queryAll(
-    `SELECT oi.*, p.packageSpec
-     FROM order_items oi
-     LEFT JOIN products p ON oi.productCode = p.productCode
-     WHERE oi.orderId = ?
-     ORDER BY oi.sortOrder ASC`,
-    [id]
-  )
+  const items = queryAll('SELECT * FROM order_items WHERE orderId=? ORDER BY sortOrder,id', [id])
+    .map(item => ({ ...item, snapshotNeedsReview: item.packageSpec === null }))
+
   return { ...order, items }
 }
 
@@ -120,6 +99,8 @@ export function createOrder(data: OrderData) {
 }
 
 export function updateOrder(id: number, data: OrderData) {
+  const current = getOrderById(id)
+  if (current && hasLinkedProductionOrder(id) && (data.receiver !== current.receiver || (data.customerId != null && current.customerId != null && data.customerId !== current.customerId))) throw new Error('该订单已关联生产任务，不能修改客户。')
   const d = normalizeOrderData(data)
   run(
     `UPDATE orders SET documentNo=?, orderNo=?, date=?, sender=?, senderPhone=?,
@@ -136,9 +117,65 @@ export function updateOrder(id: number, data: OrderData) {
 }
 
 export function deleteOrder(id: number) {
-  run('DELETE FROM order_items WHERE orderId = ?', [id])
-  run('DELETE FROM orders WHERE id = ?', [id])
-  return { success: true }
+  if (hasLinkedProductionOrder(id)) throw new Error('该订单已关联生产任务，不能删除。请先处理关联任务。')
+  return withTransaction(() => {
+    run('DELETE FROM order_items WHERE orderId = ?', [id])
+    run('DELETE FROM orders WHERE id = ?', [id])
+    return { success: true }
+  })
+}
+
+function numberField(value: unknown, label: string, decimals: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000_000) throw new Error(`${label}必须是有限的非负数，且不能超过十亿`)
+  const scale = 10 ** decimals
+  if (Math.abs(Math.round(value * scale) - value * scale) > 1e-6) throw new Error(`${label}最多支持${decimals}位小数`)
+  return value
+}
+function normalizedItem(item: Partial<OrderItemData>) {
+  if (!item || typeof item.productName !== 'string' || !item.productName.trim()) throw new Error('商品名称不能为空')
+  const quantity = numberField(item.quantity, '数量', 6)
+  const price = numberField(item.price, '单价', 2)
+  const cents = (BigInt(Math.round(quantity * 1_000_000)) * BigInt(Math.round(price * 100)) + 500_000n) / 1_000_000n
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('金额过大，请拆分订单')
+  return { ...item, productName: item.productName.trim(), quantity, price, amount: Number(cents) / 100,
+    packageSpec: item.snapshotNeedsReview && !item.packageSpec ? null : (item.packageSpec ?? null) }
+}
+
+export function saveOrderWithItems(request: { id?: number; order: OrderData; items: Partial<OrderItemData>[] }) {
+  if (!request || !request.order || !Array.isArray(request.items) || !request.items.length) throw new Error('请至少添加一条商品明细')
+  if (request.items.length > 10000) throw new Error('单张订单明细过多')
+  const items = request.items.map(normalizedItem)
+  const data = request.order
+  if (typeof data.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(data.date) || !Number.isFinite(Date.parse(data.date))) throw new Error('订单日期无效')
+  if (typeof data.receiver !== 'string' || !data.receiver.trim()) throw new Error('请选择有效客户')
+  return withTransaction(() => {
+    const existing = request.id === undefined ? null : getOrderById(request.id)
+    if (request.id !== undefined && !existing) throw new Error('订单不存在，请刷新列表')
+    const customer = data.customerId ? queryOne('SELECT * FROM customers WHERE id=?', [data.customerId]) : queryOne('SELECT * FROM customers WHERE name=?', [data.receiver])
+    const unchangedCustomer = existing && existing.receiver === data.receiver && (data.customerId == null || data.customerId === existing.customerId)
+    if (!unchangedCustomer && (!customer || customer.name !== data.receiver)) throw new Error('客户不存在或已变更，请重新选择')
+    const customerId = unchangedCustomer && existing.customerId != null ? existing.customerId : customer?.id || null
+    const linked = existing && hasLinkedProductionOrder(existing.id)
+    if (linked) {
+      const same = existing.receiver === data.receiver && (data.customerId == null || existing.customerId == null || existing.customerId === data.customerId) && existing.items.length === items.length && existing.items.every((old: any, i: number) => {
+        const next = items[i]
+        return ['productCode','productName','specification','unit','quantity'].every(key => (old[key] ?? '') === ((next as any)[key] ?? '')) && (old.packageSpec ?? null) === (next.packageSpec ?? null)
+      })
+      if (!same) throw new Error('该订单已关联生产任务，不能直接修改客户、商品或数量。请先处理关联任务。')
+    }
+    const documentNo = existing?.documentNo || generateDocumentNo(data.date)
+    const payload = { ...data, documentNo }
+    const id = existing ? existing.id : createOrder(payload).id
+    if (existing) updateOrder(id, payload)
+    run('UPDATE orders SET customerId=? WHERE id=?', [customerId, id])
+    if (linked) {
+      items.forEach((item, index) => run('UPDATE order_items SET price=?,amount=?,remark=? WHERE id=?', [item.price, item.amount, item.remark || '', existing.items[index].id]))
+    } else {
+      run('DELETE FROM order_items WHERE orderId=?', [id])
+      items.forEach((item, index) => insertOrderItem({ ...item, orderId: id, sortOrder: index }))
+    }
+    return { id, documentNo }
+  })
 }
 
 function normalizeOrderData(data: OrderData) {
@@ -171,9 +208,14 @@ export function getOrderItems(orderId: number) {
 }
 
 export function createOrderItem(data: OrderItemData) {
+  if (hasLinkedProductionOrder(data.orderId)) throw new Error('该订单已关联生产任务，不能修改明细。')
+  return insertOrderItem({ ...data, ...normalizedItem(data) })
+}
+
+function insertOrderItem(data: OrderItemData) {
   const result = run(
-    `INSERT INTO order_items (orderId, productCode, productName, specification, unit, quantity, price, amount, remark, sortOrder)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO order_items (orderId, productCode, productName, specification, unit, quantity, price, amount, remark, sortOrder, packageSpec)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       data.orderId,
       data.productCode || '',
@@ -185,30 +227,20 @@ export function createOrderItem(data: OrderItemData) {
       data.amount || 0,
       data.remark || '',
       data.sortOrder || 0,
+      data.packageSpec ?? null,
     ]
   )
   return { id: result.lastInsertRowid }
 }
 
 export function updateOrderItem(id: number, data: Partial<OrderItemData>) {
-  run(
-    `UPDATE order_items SET productCode=?, productName=?, specification=?, unit=?,
-      quantity=?, price=?, amount=?, remark=?, sortOrder=?
-     WHERE id=?`,
-    [
-      data.productCode || '',
-      data.productName || '',
-      data.specification || '',
-      data.unit || '',
-      data.quantity || 0,
-      data.price || 0,
-      data.amount || 0,
-      data.remark || '',
-      data.sortOrder || 0,
-      id,
-    ]
-  )
-  return { success: true }
+  const previous = queryOne('SELECT * FROM order_items WHERE id=?', [id])
+  if (!previous) throw new Error('订单明细不存在')
+  if (hasLinkedProductionOrder(previous.orderId)) throw new Error('该订单已关联生产任务，不能修改明细。')
+  const item = normalizedItem({ ...previous, ...data })
+  run(`UPDATE order_items SET productCode=?,productName=?,specification=?,unit=?,quantity=?,price=?,amount=?,remark=?,sortOrder=?,packageSpec=? WHERE id=?`,
+    [item.productCode || '',item.productName,item.specification || '',item.unit || '',item.quantity,item.price,item.amount,item.remark || '',item.sortOrder || 0,item.packageSpec,id])
+  return { success:true }
 }
 
 // ── Products & Customers ──
@@ -342,6 +374,7 @@ export function getCustomerByCode(code: string) {
 
 export function importExcelFromFile(excelPath: string): { success: boolean; message: string } {
   try {
+    return withTransaction(() => {
     if (!fs.existsSync(excelPath)) {
       return { success: false, message: `文件不存在: ${excelPath}` }
     }
@@ -477,12 +510,15 @@ export function importExcelFromFile(excelPath: string): { success: boolean; mess
       success: true,
       message: `导入成功！产品 ${productCount} 条，客户 ${customerCount} 条`
     }
+    })
   } catch (err: any) {
     return { success: false, message: `导入失败: ${err.message}` }
   }
 }
 
 export function deleteOrderItem(id: number) {
+  const previous = queryOne('SELECT orderId FROM order_items WHERE id=?', [id])
+  if (previous && hasLinkedProductionOrder(previous.orderId)) throw new Error('该订单已关联生产任务，不能删除明细。')
   run('DELETE FROM order_items WHERE id = ?', [id])
   return { success: true }
 }
@@ -515,7 +551,7 @@ export function getOrderSummary(dateFrom: string, dateTo: string) {
     customerName: row.receiver || '',
     productCode: row.productCode || '',
     productName: row.productName || '',
-    quantity: Math.round(row.quantity || 0),
+    quantity: row.quantity || 0,
     price: row.price || 0,
     amount: row.amount || 0,
   }))
@@ -925,7 +961,7 @@ export function deleteRawMaterial(id: number) {
 export function generateInboundNo(date?: string): string {
   const today = date
     ? date.replace(/-/g, '')
-    : new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    : localDate().replace(/-/g, '')
   const prefix = `RK-${today}-`
   const last = queryOne(
     "SELECT inboundNo FROM material_inbound WHERE inboundNo LIKE ? ORDER BY id DESC LIMIT 1",
@@ -943,7 +979,7 @@ export function generateInboundNo(date?: string): string {
 export function generateOutboundNo(date?: string): string {
   const today = date
     ? date.replace(/-/g, '')
-    : new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    : localDate().replace(/-/g, '')
   const prefix = `CK-${today}-`
   const last = queryOne(
     "SELECT outboundNo FROM material_outbound WHERE outboundNo LIKE ? ORDER BY id DESC LIMIT 1",
@@ -961,7 +997,7 @@ export function generateOutboundNo(date?: string): string {
 export function generateProductInboundNo(date?: string): string {
   const today = date
     ? date.replace(/-/g, '')
-    : new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    : localDate().replace(/-/g, '')
   const prefix = `PRK-${today}-`
   const last = queryOne(
     "SELECT inboundNo FROM product_inbound WHERE inboundNo LIKE ? ORDER BY id DESC LIMIT 1",
@@ -1290,8 +1326,16 @@ export function getPrintSettings() {
 }
 
 export function setPrintSettings(data: Record<string, string | number>) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('打印设置格式无效')
   for (const [key, value] of Object.entries(data)) {
-    run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, String(value)])
+    if (!['printProfilesV1', 'printPageHeight'].includes(key)) throw new Error('未知打印设置')
+    if (key === 'printProfilesV1') {
+      if (typeof value !== 'string' || value.length > 5_000_000) throw new Error('打印模板数据无效')
+      validatePrintSettings(JSON.parse(value))
+    } else if (!Number.isFinite(Number(value)) || Number(value) < 30 || Number(value) > 1000) throw new Error('纸张高度无效')
   }
-  return { success: true }
+  return withTransaction(() => {
+    for (const [key, value] of Object.entries(data)) run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, String(value)])
+    return { success: true }
+  })
 }

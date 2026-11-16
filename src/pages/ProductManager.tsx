@@ -270,7 +270,7 @@ const ProductManager: React.FC = () => {
     if (!selectedTable) return
     try {
       const result = await undoPriceTableChange(selectedTable.id)
-      if (result.success) {
+      if (result.success && result.log) {
         setMessage(`已撤销：${result.log.productCode} 恢复为 ¥${result.log.oldPrice.toFixed(2)}`)
         loadPrices()
       } else {

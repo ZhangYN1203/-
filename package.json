@@ -1,16 +1,21 @@
 {
   "name": "order-print-tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "商品装具调拨单打印工具 - 基于 Electron 的本地订单打印管理系统",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build && electron-builder",
-    "build:vite": "tsc && vite build",
+    "dev": "npm run electron:dev",
+    "build": "npm run build:vite && npm run build:electron",
+    "build:vite": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:5173 && set VITE_DEV_SERVER_URL=http://localhost:5173 && electron .\"",
-    "electron:build": "tsc -p tsconfig.electron.json && vite build && electron-builder --win --x64",
-    "electron:build:dir": "tsc -p tsconfig.electron.json && vite build && electron-builder --win --x64 --dir"
+    "electron:dev": "npm run build:electron && concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder --win --x64",
+    "electron:build:dir": "npm run build && electron-builder --win --x64 --dir",
+    "dev:web": "vite",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "build": {
     "appId": "com.jsww.order-print-tool",
@@ -59,6 +64,9 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^22.20.5",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
@@ -66,8 +74,10 @@
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "jsdom": "^26.1.0",
     "typescript": "~5.6.3",
     "vite": "^6.0.3",
+    "vitest": "^3.2.7",
     "wait-on": "^8.0.1"
   }
 }

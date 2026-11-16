@@ -13,6 +13,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeCustomerProduct: (customerCode: string, productCode: string) => ipcRenderer.invoke('db:removeCustomerProduct', customerCode, productCode),
   searchCustomerPrices: (customerCode: string, keyword?: string) => ipcRenderer.invoke('db:searchCustomerPrices', customerCode, keyword),
 
+  getProductionStatus: () => ipcRenderer.invoke('production:status'),
+  migrateProductionData: (bundle: any) => ipcRenderer.invoke('production:migrate', bundle),
+  getProductionRecords: (store: string) => ipcRenderer.invoke('production:list', store),
+  getProductionRecord: (store: string, id: number) => ipcRenderer.invoke('production:get', store, id),
+  applyProductionOperations: (operations: any[]) => ipcRenderer.invoke('production:apply', operations),
+  printDocument: (request: any) => ipcRenderer.invoke('print:document', request),
+  listPrinters: () => ipcRenderer.invoke('print:listPrinters'),
+  saveOrderWithItems: (request: any) => ipcRenderer.invoke('db:saveOrderWithItems', request),
   // Orders
   generateDocumentNo: (date?: string) => ipcRenderer.invoke('db:generateDocumentNo', date),
   getOrders: (filters?: { search?: string }) => ipcRenderer.invoke('db:getOrders', filters),
